@@ -40,6 +40,8 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_overview,
             commands::get_agent_stats,
@@ -59,6 +61,7 @@ pub fn run() {
             commands::set_settings,
             commands::get_pricing_info,
             commands::set_pricing_overrides,
+            commands::remove_pricing_override,
             commands::refresh_pricing,
             commands::export_csv,
             commands::export_json,

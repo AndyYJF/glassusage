@@ -127,6 +127,16 @@ impl Pricing {
         Ok(())
     }
 
+    /// Drop one override and persist. Returns whether anything was removed.
+    pub fn remove_override(&self, model: &str) -> Result<bool> {
+        let mut t = self.table.write();
+        let removed = t.overrides.remove(model).is_some();
+        if removed {
+            std::fs::write(&self.overrides_path, serde_json::to_string_pretty(&t.overrides)?)?;
+        }
+        Ok(removed)
+    }
+
     pub fn overrides(&self) -> HashMap<String, ModelPrice> {
         self.table.read().overrides.clone()
     }

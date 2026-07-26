@@ -37,6 +37,9 @@ install. Keep the same per-user installer — it reuses `com.glassusage.desktop`
 so the previous install directory is replaced in place and
 `%APPDATA%\com.glassusage.desktop` (usage DB, settings, credentials) is left untouched.
 
+From 0.3.0 onward you can also update in-app: **Settings → Updates → Check for updates**.
+That path verifies a Tauri minisign signature from GitHub Releases before installing.
+
 Or build from source:
 
 ```bash
@@ -140,3 +143,26 @@ each agent's on-disk records (key paths, value types, DDL) so parsers can be che
 reading anyone's conversations; `inspect-usage-db.mjs` and `probe-pricing.mjs` cross-check
 what a run actually collected and priced; `capture-window.ps1` and `capture-widget.ps1`
 screenshot the running app.
+
+## Releases & signing
+
+Tagged releases (`v*`) build through `.github/workflows/release.yml`.
+
+**Updater signatures (required for in-app updates).** Tauri minisign keys:
+
+- Private key: keep only as GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY` (and optional
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`). Locally it lives in `.tauri/glassusage.key` (gitignored).
+- Public key: baked into `src-tauri/tauri.conf.json` → `plugins.updater.pubkey`.
+
+Local signed build:
+
+```bash
+# PowerShell
+$env:TAURI_SIGNING_PRIVATE_KEY_PATH = "$PWD\.tauri\glassusage.key"
+npm run app:build
+```
+
+**Authenticode / SmartScreen (optional).** A purchased code-signing certificate reduces
+Windows warnings. Set CI secrets `TAURI_SIGNING_CERTIFICATE` (base64 PFX) and
+`TAURI_SIGNING_CERTIFICATE_PASSWORD`, or configure `bundle.windows.certificateThumbprint`
+for a local certificate store. This is separate from the updater minisign key above.

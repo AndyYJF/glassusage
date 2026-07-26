@@ -67,6 +67,8 @@ export const api = {
   pricingInfo: () => invoke<PricingInfo>("get_pricing_info"),
   setPricingOverrides: (overrides: Record<string, ModelPrice>) =>
     invoke<number>("set_pricing_overrides", { overrides }),
+  removePricingOverride: (model: string) =>
+    invoke<number>("remove_pricing_override", { model }),
   refreshPricing: () => invoke<number>("refresh_pricing"),
 
   // cursor

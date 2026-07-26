@@ -9,6 +9,7 @@ import { TitleBar } from "./components/layout/TitleBar";
 import { Toast } from "./components/layout/Toast";
 import { Dashboard } from "./pages/Dashboard";
 import { UsagePage } from "./pages/Usage";
+import { ComparePage } from "./pages/Compare";
 import { AgentDetail } from "./pages/AgentDetail";
 import { SettingsPage } from "./pages/Settings";
 import { useBackendEvents, useSettings } from "./lib/hooks";
@@ -107,6 +108,7 @@ export default function App() {
           >
             {route === "dashboard" && <Dashboard onOpenAgent={(s) => navigate("agents", s)} />}
             {route === "usage" && <UsagePage />}
+            {route === "compare" && <ComparePage />}
             {route === "agents" && <AgentDetail source={activeSource} />}
             {route === "settings" && <SettingsPage />}
           </motion.div>

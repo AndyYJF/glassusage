@@ -83,10 +83,15 @@ export function useUsageLog(filter: UsageFilter, page: number, pageSize: number)
   });
 }
 
-export function useGroupStats(column: GroupBy, filter: UsageFilter) {
+export function useGroupStats(
+  column: GroupBy,
+  filter: UsageFilter,
+  opts?: { enabled?: boolean },
+) {
   return useQuery({
     queryKey: ["group", column, filter],
     queryFn: () => api.groupStats(column, filter),
+    enabled: opts?.enabled ?? true,
   });
 }
 

@@ -1,4 +1,4 @@
-export const ROUTES = ["dashboard", "usage", "agents", "settings"] as const;
+export const ROUTES = ["dashboard", "usage", "compare", "agents", "settings"] as const;
 
 export type Route = (typeof ROUTES)[number];
 

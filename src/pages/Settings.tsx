@@ -1,13 +1,15 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Cloud, DollarSign, FolderOpen, Info, Layers, Server, Sparkles, Wallet } from "lucide-react";
+import { Cloud, DollarSign, FolderOpen, Info, Layers, RefreshCw, Server, Sparkles, Wallet } from "lucide-react";
 
 import { GlassButton } from "../components/glass/GlassButton";
 import { GlassCard } from "../components/glass/GlassCard";
 import { GlassSegmented } from "../components/glass/GlassSegmented";
 import { GlassSlider } from "../components/glass/GlassSlider";
 import { GlassSwitch } from "../components/glass/GlassSwitch";
+import { PricingOverrides } from "../components/settings/PricingOverrides";
 import { RemoteInstances } from "../components/settings/RemoteInstances";
+import { UpdateChecker } from "../components/settings/UpdateChecker";
 import { api } from "../lib/api";
 import { useCursorStatus, usePricingInfo, useSettings, useSourceHealth } from "../lib/hooks";
 import { useT, statusKey } from "../lib/i18n";
@@ -341,6 +343,11 @@ export function SettingsPage() {
         <div className="text-[0.6875rem] text-[rgb(var(--text-dim))]">
           {t("settings.priceNote")}
         </div>
+        <PricingOverrides />
+      </Section>
+
+      <Section title={t("settings.updates")} icon={<RefreshCw size={15} />}>
+        <UpdateChecker />
       </Section>
 
       <Section title={t("settings.budget")} icon={<Wallet size={15} />}>

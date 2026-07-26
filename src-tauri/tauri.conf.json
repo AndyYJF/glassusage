@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "GlassUsage",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "com.glassusage.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,7 +12,7 @@
   "app": {
     "withGlobalTauri": false,
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; img-src 'self' asset: data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://github.com https://objects.githubusercontent.com https://release-assets.githubusercontent.com https://api.github.com"
     },
     "windows": [
       {
@@ -49,6 +49,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
     "copyright": "GlassUsage",
@@ -60,6 +61,17 @@
         "installMode": "currentUser",
         "languages": ["English", "SimpChinese"],
         "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE4MDMxMTExRTQ4NjAzMDQKUldRRUE0YmtFUkVER0FzSzFGbTkwL21WUGtoYlVtNzFSWi9TSlNZUndDeTNkcmNudDhhK1pvVncK",
+      "endpoints": [
+        "https://github.com/AndyYJF/glassusage/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

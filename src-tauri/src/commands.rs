@@ -197,6 +197,15 @@ pub fn set_pricing_overrides(
 }
 
 #[tauri::command]
+pub fn remove_pricing_override(state: State<'_, Arc<AppState>>, model: String) -> Res<usize> {
+    let removed = state.pricing.remove_override(&model).map_err(err)?;
+    if !removed {
+        return Ok(0);
+    }
+    state.store.reprice(&state.pricing).map_err(err)
+}
+
+#[tauri::command]
 pub async fn refresh_pricing(state: State<'_, Arc<AppState>>) -> Res<usize> {
     let st = state.inner().clone();
     let n = st.pricing.refresh().await.map_err(err)?;

@@ -23,6 +23,8 @@
     "dialog:default",
     "global-shortcut:default",
     "window-state:default",
-    "autostart:default"
+    "autostart:default",
+    "updater:default",
+    "process:default"
   ]
 }

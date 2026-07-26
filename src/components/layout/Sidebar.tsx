@@ -3,7 +3,7 @@
  * with `layoutId`, so it glides between entries the way a macOS sidebar selection does.
  */
 import { motion } from "framer-motion";
-import { Activity, Cpu, LayoutDashboard, Settings as SettingsIcon } from "lucide-react";
+import { Activity, Cpu, GitCompare, LayoutDashboard, Settings as SettingsIcon } from "lucide-react";
 
 import { SOURCE_LIST, STATUS_CLASS, rollupSourceStatus } from "../../lib/sources";
 import { useSourceHealth } from "../../lib/hooks";
@@ -14,6 +14,7 @@ import type { MessageKey } from "../../lib/i18n";
 const NAV: { route: Route; labelKey: MessageKey; icon: React.ReactNode }[] = [
   { route: "dashboard", labelKey: "nav.dashboard", icon: <LayoutDashboard size={16} /> },
   { route: "usage", labelKey: "nav.usage", icon: <Activity size={16} /> },
+  { route: "compare", labelKey: "nav.compare", icon: <GitCompare size={16} /> },
   { route: "agents", labelKey: "nav.agents", icon: <Cpu size={16} /> },
   { route: "settings", labelKey: "nav.settings", icon: <SettingsIcon size={16} /> },
 ];

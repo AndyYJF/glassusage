@@ -5,6 +5,9 @@ src-tauri/target/
 # Built installers and binaries, kept out of version control; rebuild with `npm run tauri build`.
 release/
 
+# Updater signing private key — never commit. Public key lives in tauri.conf.json.
+.tauri/
+
 # The generated icons and lens displacement maps stay tracked on purpose: the Rust build
 # reads the icons at compile time, so a fresh clone must have them before any build runs.
 # Regenerate with `npm run assets`.
