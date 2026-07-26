@@ -1,0 +1,14 @@
+node_modules/
+dist/
+src-tauri/target/
+
+# Built installers and binaries, kept out of version control; rebuild with `npm run tauri build`.
+release/
+
+# The generated icons and lens displacement maps stay tracked on purpose: the Rust build
+# reads the icons at compile time, so a fresh clone must have them before any build runs.
+# Regenerate with `npm run assets`.
+
+.vite/
+*.log
+.DS_Store
