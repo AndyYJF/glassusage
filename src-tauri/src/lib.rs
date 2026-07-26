@@ -61,6 +61,8 @@ pub fn run() {
             commands::set_pricing_overrides,
             commands::refresh_pricing,
             commands::export_csv,
+            commands::export_json,
+            commands::export_monthly_report,
             commands::list_remote_instances,
             commands::upsert_remote_instance,
             commands::delete_remote_instance,
@@ -94,11 +96,13 @@ pub fn run() {
             }
             if let Some(widget) = app.get_webview_window("widget") {
                 window::prepare_widget(&widget);
+                window::apply_widget_compact(app.handle(), settings.widget_compact);
                 let _ = window::place_widget_default(&widget);
             }
 
             build_tray(app.handle())?;
             register_shortcut(app.handle(), &settings.widget_shortcut);
+            apply_autostart(app.handle(), settings.autostart);
 
             // First pass immediately, then watchers and timers take over.
             let handle = app.handle().clone();
@@ -211,5 +215,32 @@ fn register_shortcut(app: &tauri::AppHandle, accelerator: &str) {
     });
     if let Err(e) = result {
         tracing::warn!("could not register {accelerator}: {e}");
+    }
+}
+
+/// Drop the previous accelerator and bind the new one without restarting.
+pub fn replace_widget_shortcut(app: &tauri::AppHandle, old: &str, new: &str) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    if old != new {
+        if let Ok(sc) = old.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+            if let Err(e) = app.global_shortcut().unregister(sc) {
+                tracing::warn!("could not unregister {old}: {e}");
+            }
+        }
+    }
+    register_shortcut(app, new);
+}
+
+pub fn apply_autostart(app: &tauri::AppHandle, on: bool) {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    let result = if on {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    if let Err(e) = result {
+        tracing::warn!("autostart {}: {e}", if on { "enable" } else { "disable" });
     }
 }

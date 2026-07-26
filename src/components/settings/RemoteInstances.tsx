@@ -8,7 +8,7 @@
  */
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { Check, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
 
 import { GlassButton } from "../glass/GlassButton";
 import { GlassSwitch } from "../glass/GlassSwitch";
@@ -16,7 +16,7 @@ import { api } from "../../lib/api";
 import { useRemoteInstances } from "../../lib/hooks";
 import { useT } from "../../lib/i18n";
 import { useUi } from "../../lib/store";
-import type { RemoteInstanceInput, TestReport } from "../../lib/types";
+import type { RemoteInstance, RemoteInstanceInput, TestReport } from "../../lib/types";
 
 const BLANK: RemoteInstanceInput = {
   name: "",
@@ -41,6 +41,7 @@ function Field({
   placeholder,
   type = "text",
   width = "flex-1",
+  disabled = false,
 }: {
   label: string;
   value: string;
@@ -48,6 +49,7 @@ function Field({
   placeholder?: string;
   type?: string;
   width?: string;
+  disabled?: boolean;
 }) {
   return (
     <label className={`flex min-w-0 flex-col gap-1 ${width}`}>
@@ -58,9 +60,10 @@ function Field({
         type={type}
         value={value}
         spellCheck={false}
+        disabled={disabled}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        className="no-drag min-w-0 rounded-lg border border-white/8 bg-black/15 px-2 py-1 text-[0.75rem] outline-none placeholder:text-[rgb(var(--text-faint))] focus:border-[rgb(var(--accent)/0.6)]"
+        className="no-drag min-w-0 rounded-lg border border-white/8 bg-black/15 px-2 py-1 text-[0.75rem] outline-none placeholder:text-[rgb(var(--text-faint))] focus:border-[rgb(var(--accent)/0.6)] disabled:opacity-55"
       />
     </label>
   );
@@ -73,6 +76,9 @@ export function RemoteInstances() {
   const { data: instances } = useRemoteInstances();
 
   const [draft, setDraft] = useState<RemoteInstanceInput | null>(null);
+  /** Name is the primary key — lock it while editing an existing row. */
+  const [editingExisting, setEditingExisting] = useState(false);
+  const [hadSecret, setHadSecret] = useState(false);
   const [report, setReport] = useState<TestReport | null>(null);
   const [testing, setTesting] = useState(false);
   const [syncing, setSyncing] = useState<string | null>(null);
@@ -80,12 +86,26 @@ export function RemoteInstances() {
   const set = (patch: Partial<RemoteInstanceInput>) =>
     setDraft((d) => (d ? { ...d, ...patch } : d));
 
+  const closeForm = () => {
+    setDraft(null);
+    setReport(null);
+    setEditingExisting(false);
+    setHadSecret(false);
+  };
+
+  const startEdit = (inst: RemoteInstance) => {
+    const { hasSecret, ...rest } = inst;
+    setDraft({ ...rest, password: "" });
+    setEditingExisting(true);
+    setHadSecret(hasSecret);
+    setReport(null);
+  };
+
   const save = async () => {
     if (!draft) return;
     try {
       await api.upsertRemote(draft);
-      setDraft(null);
-      setReport(null);
+      closeForm();
       qc.invalidateQueries({ queryKey: ["remote"] });
       notify(t("remote.saved", { name: draft.name }));
     } catch (e) {
@@ -138,6 +158,15 @@ export function RemoteInstances() {
               <RefreshCw size={12} className={syncing === inst.name ? "animate-spin" : undefined} />
               {t("common.sync")}
             </GlassButton>
+            <GlassButton
+              size="sm"
+              tone="ghost"
+              title={t("remote.edit")}
+              disabled={draft !== null}
+              onClick={() => startEdit(inst)}
+            >
+              <Pencil size={12} />
+            </GlassButton>
             <GlassSwitch
               checked={inst.enabled}
               label={`Enable ${inst.name}`}
@@ -166,7 +195,13 @@ export function RemoteInstances() {
       {draft ? (
         <div className="glass-quiet flex flex-col gap-2 p-3">
           <div className="flex gap-2">
-            <Field label={t("remote.name")} value={draft.name} onChange={(name) => set({ name })} placeholder="build-box" />
+            <Field
+              label={t("remote.name")}
+              value={draft.name}
+              onChange={(name) => set({ name })}
+              placeholder="build-box"
+              disabled={editingExisting}
+            />
             <label className="flex w-[130px] flex-col gap-1">
               <span className="text-[0.625rem] font-semibold uppercase tracking-[0.06em] text-[rgb(var(--text-faint))]">
                 {t("remote.agent")}
@@ -181,6 +216,9 @@ export function RemoteInstances() {
               </select>
             </label>
           </div>
+          {editingExisting && (
+            <div className="text-[0.6875rem] text-[rgb(var(--text-dim))]">{t("remote.nameLocked")}</div>
+          )}
 
           <div className="flex gap-2">
             <Field label={t("remote.host")} value={draft.host} onChange={(host) => set({ host })} placeholder="10.0.0.5" />
@@ -223,7 +261,7 @@ export function RemoteInstances() {
                 type="password"
                 value={draft.password ?? ""}
                 onChange={(password) => set({ password })}
-                placeholder="Encrypted with DPAPI before it is stored"
+                placeholder={hadSecret ? t("remote.passwordKeep") : t("remote.passwordHint")}
               />
             )}
           </div>
@@ -279,20 +317,21 @@ export function RemoteInstances() {
             <GlassButton size="sm" tone="accent" onClick={save} disabled={!draft.name || !draft.host}>
               {t("common.save")}
             </GlassButton>
-            <GlassButton
-              size="sm"
-              tone="ghost"
-              onClick={() => {
-                setDraft(null);
-                setReport(null);
-              }}
-            >
+            <GlassButton size="sm" tone="ghost" onClick={closeForm}>
               {t("common.cancel")}
             </GlassButton>
           </div>
         </div>
       ) : (
-        <GlassButton size="sm" className="self-start" onClick={() => setDraft({ ...BLANK })}>
+        <GlassButton
+          size="sm"
+          className="self-start"
+          onClick={() => {
+            setDraft({ ...BLANK });
+            setEditingExisting(false);
+            setHadSecret(false);
+          }}
+        >
           <Plus size={13} />
           {t("remote.add")}
         </GlassButton>

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Cloud, DollarSign, FolderOpen, Info, Layers, Server, Sparkles } from "lucide-react";
+import { Cloud, DollarSign, FolderOpen, Info, Layers, Server, Sparkles, Wallet } from "lucide-react";
 
 import { GlassButton } from "../components/glass/GlassButton";
 import { GlassCard } from "../components/glass/GlassCard";
@@ -343,6 +343,118 @@ export function SettingsPage() {
         </div>
       </Section>
 
+      <Section title={t("settings.budget")} icon={<Wallet size={15} />}>
+        <Row label={t("settings.budgetEnable")} hint={t("settings.budgetEnableHint")}>
+          <GlassSwitch
+            checked={settings.budgetAlertsEnabled ?? false}
+            onChange={(budgetAlertsEnabled) => patch({ budgetAlertsEnabled })}
+            label={t("settings.budgetEnable")}
+          />
+        </Row>
+        <Row label={t("settings.dailyCostBudget")}>
+          <input
+            type="number"
+            min={0}
+            step={0.5}
+            defaultValue={settings.dailyCostBudget ?? 10}
+            spellCheck={false}
+            disabled={!(settings.budgetAlertsEnabled ?? false)}
+            className="no-drag w-[120px] rounded-lg border border-white/8 bg-black/15 px-2 py-1 text-[0.75rem] outline-none focus:border-[rgb(var(--accent)/0.6)] disabled:opacity-45"
+            onBlur={(e) => {
+              const v = Number(e.target.value);
+              if (!Number.isFinite(v) || v < 0) return;
+              if (v !== settings.dailyCostBudget) patch({ dailyCostBudget: v });
+            }}
+          />
+        </Row>
+        <Row label={t("settings.dailyTokenBudget")} hint={t("settings.dailyTokenBudgetHint")}>
+          <input
+            type="number"
+            min={0}
+            step={1000}
+            defaultValue={settings.dailyTokenBudget ?? 0}
+            spellCheck={false}
+            disabled={!(settings.budgetAlertsEnabled ?? false)}
+            className="no-drag w-[140px] rounded-lg border border-white/8 bg-black/15 px-2 py-1 text-[0.75rem] outline-none focus:border-[rgb(var(--accent)/0.6)] disabled:opacity-45"
+            onBlur={(e) => {
+              const v = Math.round(Number(e.target.value));
+              if (!Number.isFinite(v) || v < 0) return;
+              if (v !== settings.dailyTokenBudget) patch({ dailyTokenBudget: v });
+            }}
+          />
+        </Row>
+        <div
+          className={`flex flex-col gap-2 ${!(settings.budgetAlertsEnabled ?? false) ? "opacity-45 pointer-events-none" : ""}`}
+        >
+          <div className="min-w-0">
+            <div className="text-[0.8125rem] font-medium">{t("settings.budgetAgents")}</div>
+            <div className="mt-0.5 text-[0.6875rem] text-[rgb(var(--text-dim))]">
+              {t("settings.budgetAgentsHint")}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {(() => {
+              const selected = settings.budgetAlertSources ?? [];
+              const allOn = selected.length === 0;
+              return (
+                <>
+                  <button
+                    type="button"
+                    className="chip transition-colors"
+                    style={
+                      allOn
+                        ? {
+                            background: "rgb(var(--accent) / 0.28)",
+                            borderColor: "rgb(var(--accent) / 0.55)",
+                            color: "rgb(var(--text))",
+                          }
+                        : undefined
+                    }
+                    onClick={() => patch({ budgetAlertSources: [] })}
+                  >
+                    {t("settings.budgetAgentsAll")}
+                  </button>
+                  {SOURCE_LIST.map((meta) => {
+                    const on = selected.includes(meta.id);
+                    return (
+                      <button
+                        key={meta.id}
+                        type="button"
+                        className="chip transition-colors"
+                        style={
+                          on
+                            ? {
+                                background: "rgb(var(--accent) / 0.28)",
+                                borderColor: "rgb(var(--accent) / 0.55)",
+                                color: "rgb(var(--text))",
+                              }
+                            : undefined
+                        }
+                        onClick={() => {
+                          let next: string[];
+                          if (allOn) {
+                            // Leaving "all": start with only this agent.
+                            next = [meta.id];
+                          } else if (on) {
+                            next = selected.filter((id) => id !== meta.id);
+                          } else {
+                            next = [...selected, meta.id];
+                          }
+                          // No chips left → back to all agents.
+                          patch({ budgetAlertSources: next });
+                        }}
+                      >
+                        {meta.label}
+                      </button>
+                    );
+                  })}
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      </Section>
+
       <Section title={t("settings.remote")} icon={<Server size={15} />}>
         <RemoteInstances />
       </Section>
@@ -369,6 +481,13 @@ export function SettingsPage() {
               api.setWidgetAlwaysOnTop(on).then(() => qc.invalidateQueries({ queryKey: ["settings"] }))
             }
             label={t("settings.widgetTop")}
+          />
+        </Row>
+        <Row label={t("settings.widgetCompact")} hint={t("settings.widgetCompactHint")}>
+          <GlassSwitch
+            checked={settings.widgetCompact ?? false}
+            onChange={(widgetCompact) => patch({ widgetCompact })}
+            label={t("settings.widgetCompact")}
           />
         </Row>
         <Row label={t("settings.widgetShortcut")} hint={t("settings.widgetShortcutHint")}>

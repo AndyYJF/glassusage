@@ -32,6 +32,11 @@ read-only snapshot of the remote SQLite file; nothing is installed on the remote
 Download the latest Windows installer from
 [Releases](https://github.com/AndyYJF/glassusage/releases).
 
+Upgrading from an older build: run the new `GlassUsage_*_x64-setup.exe` over the existing
+install. Keep the same per-user installer — it reuses `com.glassusage.desktop` / `GlassUsage`
+so the previous install directory is replaced in place and
+`%APPDATA%\com.glassusage.desktop` (usage DB, settings, credentials) is left untouched.
+
 Or build from source:
 
 ```bash

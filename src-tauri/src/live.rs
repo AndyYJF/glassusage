@@ -156,6 +156,8 @@ impl LiveTracker {
             tokens_today: inner.tokens_today,
             per_source,
             spark60: spark,
+            budget_cost_today: inner.cost_today,
+            budget_tokens_today: inner.tokens_today,
         }
     }
 

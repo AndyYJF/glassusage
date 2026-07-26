@@ -119,8 +119,11 @@ impl Pricing {
     }
 
     pub fn set_overrides(&self, overrides: HashMap<String, ModelPrice>) -> Result<()> {
-        std::fs::write(&self.overrides_path, serde_json::to_string_pretty(&overrides)?)?;
-        self.table.write().overrides = overrides;
+        let mut t = self.table.write();
+        for (k, v) in overrides {
+            t.overrides.insert(k, v);
+        }
+        std::fs::write(&self.overrides_path, serde_json::to_string_pretty(&t.overrides)?)?;
         Ok(())
     }
 

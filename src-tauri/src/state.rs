@@ -22,6 +22,25 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// Serializes scans so two triggers cannot interleave on the same watermark.
     scan_lock: Mutex<()>,
+    /// Local calendar days already alerted for cost / tokens, so we do not spam.
+    budget_alerted: Mutex<BudgetAlertGate>,
+}
+
+#[derive(Default)]
+struct BudgetAlertGate {
+    cost_day: Option<String>,
+    tokens_day: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetAlertEvent {
+    pub kind: String,
+    pub value: f64,
+    pub limit: f64,
+    pub day: String,
+    /// Empty = all agents were in scope.
+    pub sources: Vec<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -67,6 +86,7 @@ impl AppState {
             live,
             data_dir,
             scan_lock: Mutex::new(()),
+            budget_alerted: Mutex::new(BudgetAlertGate::default()),
         })
     }
 
@@ -112,6 +132,7 @@ impl AppState {
 
                 if outcome.changed > 0 {
                     self.refresh_today_totals();
+                    self.check_budget_alerts(app);
                     let _ = app.emit(
                         "usage-updated",
                         UsageUpdated {
@@ -260,9 +281,78 @@ impl AppState {
         }
     }
 
+    /// Today's totals limited to the agents selected for budget alerts.
+    fn budget_today_totals(&self) -> (i64, f64) {
+        let settings = self.settings.get();
+        let (from, to) = crate::store::day_bounds(0);
+        match self
+            .store
+            .totals_in_range_sources(from, to, &settings.budget_alert_sources)
+        {
+            Ok(t) => (t.total_tokens, t.cost_usd),
+            Err(_) => (0, 0.0),
+        }
+    }
+
+    /// Clear the once-per-day gate (e.g. after the user changes budget caps).
+    pub fn reset_budget_alert_gate(&self) {
+        *self.budget_alerted.lock() = BudgetAlertGate::default();
+    }
+
+    /// Compare today totals against the configured caps and emit at most one toast
+    /// per kind per local calendar day.
+    pub fn check_budget_alerts(&self, app: &AppHandle) {
+        let settings = self.settings.get();
+        if !settings.budget_alerts_enabled {
+            return;
+        }
+        let (tokens_today, cost_today) = self.budget_today_totals();
+        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let mut gate = self.budget_alerted.lock();
+        let sources = settings.budget_alert_sources.clone();
+
+        if settings.daily_cost_budget > 0.0
+            && cost_today >= settings.daily_cost_budget
+            && gate.cost_day.as_deref() != Some(day.as_str())
+        {
+            gate.cost_day = Some(day.clone());
+            let _ = app.emit(
+                "budget-alert",
+                BudgetAlertEvent {
+                    kind: "cost".into(),
+                    value: cost_today,
+                    limit: settings.daily_cost_budget,
+                    day: day.clone(),
+                    sources: sources.clone(),
+                },
+            );
+        }
+
+        if settings.daily_token_budget > 0
+            && tokens_today >= settings.daily_token_budget
+            && gate.tokens_day.as_deref() != Some(day.as_str())
+        {
+            gate.tokens_day = Some(day.clone());
+            let _ = app.emit(
+                "budget-alert",
+                BudgetAlertEvent {
+                    kind: "tokens".into(),
+                    value: tokens_today as f64,
+                    limit: settings.daily_token_budget as f64,
+                    day,
+                    sources,
+                },
+            );
+        }
+    }
+
     pub fn live_rates(&self) -> LiveRates {
         self.refresh_today_totals();
-        self.live.tick()
+        let mut rates = self.live.tick();
+        let (budget_tokens, budget_cost) = self.budget_today_totals();
+        rates.budget_tokens_today = budget_tokens;
+        rates.budget_cost_today = budget_cost;
+        rates
     }
 
     /// Merge stored status rows with live detection so sources that have never been

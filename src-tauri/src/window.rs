@@ -163,3 +163,12 @@ pub fn place_widget_default(window: &WebviewWindow) -> Result<()> {
     ))?;
     Ok(())
 }
+
+/// Full vs compact mini-card size. Compact shows only today's tokens + cost.
+pub fn apply_widget_compact(app: &AppHandle, compact: bool) {
+    let Some(widget) = app.get_webview_window("widget") else {
+        return;
+    };
+    let (w, h) = if compact { (300.0, 78.0) } else { (360.0, 168.0) };
+    let _ = widget.set_size(tauri::LogicalSize::new(w, h));
+}

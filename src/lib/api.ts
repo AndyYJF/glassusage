@@ -52,6 +52,12 @@ export const api = {
   exportCsv: (filter: UsageFilter, path?: string) =>
     invoke<string>("export_csv", { filter, path }),
 
+  exportJson: (filter: UsageFilter, path?: string) =>
+    invoke<string>("export_json", { filter, path }),
+
+  exportMonthlyReport: (filter: UsageFilter, path?: string) =>
+    invoke<string>("export_monthly_report", { filter, path }),
+
   // settings
   getSettings: () => invoke<AppSettings>("get_settings"),
   setSettings: (patch: Partial<AppSettings> | Record<string, unknown>) =>

@@ -76,6 +76,14 @@ pub struct AppSettings {
     pub antigravity_ide_enabled: bool,
     pub auto_refresh_secs: u64,
     pub first_run_done: bool,
+    /// Toast when today's cost / tokens cross the configured caps.
+    pub budget_alerts_enabled: bool,
+    /// Daily spend cap in USD. Checked only when `budget_alerts_enabled`.
+    pub daily_cost_budget: f64,
+    /// Daily token cap. `0` disables the token check while leaving cost alerts on.
+    pub daily_token_budget: i64,
+    /// Agents included in the budget. Empty = all agents.
+    pub budget_alert_sources: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -103,6 +111,10 @@ impl Default for AppSettings {
             antigravity_ide_enabled: true,
             auto_refresh_secs: 30,
             first_run_done: false,
+            budget_alerts_enabled: false,
+            daily_cost_budget: 10.0,
+            daily_token_budget: 0,
+            budget_alert_sources: Vec::new(),
         }
     }
 }
@@ -129,10 +141,20 @@ pub struct SettingsStore {
 impl SettingsStore {
     pub fn load(data_dir: &Path) -> Self {
         let path = data_dir.join("settings.json");
-        let inner = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<AppSettings>(&s).ok())
-            .unwrap_or_default();
+        let inner = match std::fs::read_to_string(&path) {
+            Ok(s) => {
+                let raw: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
+                // Settings that predate onboarding must not re-open the wizard.
+                let had_flag = raw.get("firstRunDone").is_some();
+                let mut settings: AppSettings =
+                    serde_json::from_value(raw).unwrap_or_default();
+                if !had_flag {
+                    settings.first_run_done = true;
+                }
+                settings
+            }
+            Err(_) => AppSettings::default(),
+        };
         Self {
             path,
             inner: RwLock::new(inner),

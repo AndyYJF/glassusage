@@ -91,6 +91,8 @@ export interface UsageFilter {
   providers?: string[];
   models?: string[];
   search?: string;
+  /** Only rows with no cost_usd. */
+  unpricedOnly?: boolean;
 }
 
 export interface Page<T> {
@@ -128,6 +130,9 @@ export interface LiveRates {
   tokensToday: number;
   perSource: LiveSource[];
   spark60: number[];
+  /** Today's cost limited to budget-alert agents (all when unset/empty). */
+  budgetCostToday?: number;
+  budgetTokensToday?: number;
 }
 
 // ------------------------------------------------------------------------ settings
@@ -158,13 +163,20 @@ export interface AppSettings {
   antigravityIdeEnabled: boolean;
   autoRefreshSecs: number;
   firstRunDone: boolean;
+  budgetAlertsEnabled: boolean;
+  dailyCostBudget: number;
+  /** 0 = token budget disabled */
+  dailyTokenBudget: number;
+  /** Agents included in the budget. Empty = all agents. */
+  budgetAlertSources?: string[];
 }
 
+/** LiteLLM-shaped price (USD per token). Matches Rust `ModelPrice`. */
 export interface ModelPrice {
-  input: number;
-  output: number;
-  cacheRead?: number | null;
-  cacheWrite?: number | null;
+  input_cost_per_token: number;
+  output_cost_per_token: number;
+  cache_creation_input_token_cost?: number;
+  cache_read_input_token_cost?: number;
 }
 
 export interface PricingInfo {
@@ -227,4 +239,13 @@ export interface SourceStatusEvent {
   instance: string;
   status: HealthStatus;
   error: string | null;
+}
+
+export interface BudgetAlertEvent {
+  kind: "cost" | "tokens";
+  value: number;
+  limit: number;
+  day: string;
+  /** Empty = all agents were in scope. */
+  sources?: string[];
 }

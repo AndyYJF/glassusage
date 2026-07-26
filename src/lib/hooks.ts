@@ -10,10 +10,14 @@ import { listen } from "@tauri-apps/api/event";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, type Bucket, type GroupBy } from "./api";
+import { tokens, usd } from "./format";
+import { useT } from "./i18n";
 import { bucketFor, resolveRange, useUi, type RangeKey } from "./store";
+import { sourceLabel } from "./sources";
 import type {
   AgentStats,
   AppSettings,
+  BudgetAlertEvent,
   LiveRates,
   OverviewStats,
   SeriesPoint,
@@ -23,15 +27,26 @@ import type {
   UsageUpdatedEvent,
 } from "./types";
 
-/** Rounded so a re-render a few seconds later reuses the cached result. */
-function rangeKey(key: RangeKey) {
-  const { from, to } = resolveRange(key);
-  return { from, to: Math.floor(to / 60_000) * 60_000 };
+/** Align both ends to the minute so rolling windows (e.g. 1d) keep a stable query key. */
+function stabilize(from: number, to: number) {
+  const minute = 60_000;
+  const f = Math.floor(from / minute) * minute;
+  const t = Math.floor(to / minute) * minute;
+  return { from: f, to: Math.max(f, t) };
 }
 
 export function useRange() {
   const range = useUi((s) => s.range);
-  return { key: range, ...rangeKey(range) };
+  const customFrom = useUi((s) => s.customFrom);
+  const customTo = useUi((s) => s.customTo);
+  const endFollowsNow = useUi((s) => s.endFollowsNow);
+
+  if (range === "custom") {
+    const to = endFollowsNow ? Date.now() : customTo;
+    return { key: range as RangeKey, ...stabilize(customFrom, Math.max(customFrom, to)) };
+  }
+  const resolved = resolveRange(range);
+  return { key: range as RangeKey, ...stabilize(resolved.from, resolved.to) };
 }
 
 export function useOverview() {
@@ -44,7 +59,7 @@ export function useOverview() {
 
 export function useTimeseries(groupBy: GroupBy = "source", bucket?: Bucket, source?: string) {
   const { key, from, to } = useRange();
-  const b = bucket ?? bucketFor(key);
+  const b = bucket ?? bucketFor(key, from, to);
   return useQuery<SeriesPoint[]>({
     queryKey: ["timeseries", key, from, to, groupBy, b, source ?? "all"],
     queryFn: () => api.timeseries({ from, to }, groupBy, b, source),
@@ -128,6 +143,8 @@ export function useLiveRates(intervalMs = 1000) {
 /** Wires backend events to cache invalidation. Mount once, at the app root. */
 export function useBackendEvents() {
   const qc = useQueryClient();
+  const { t } = useT();
+  const notify = useUi((s) => s.notify);
   const timer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -150,11 +167,41 @@ export function useBackendEvents() {
       listen<SourceStatusEvent>("source-status", () => {
         qc.invalidateQueries({ queryKey: ["health"] });
       }),
+      listen<BudgetAlertEvent>("budget-alert", (e) => {
+        const { kind, value, limit, sources } = e.payload;
+        const scoped = sources && sources.length > 0;
+        const agents = scoped ? sources.map(sourceLabel).join(", ") : "";
+        if (kind === "cost") {
+          notify(
+            scoped
+              ? t("budget.costCrossedScoped", { value: usd(value), limit: usd(limit), agents })
+              : t("budget.costCrossed", { value: usd(value), limit: usd(limit) }),
+            "error",
+          );
+        } else {
+          notify(
+            scoped
+              ? t("budget.tokensCrossedScoped", {
+                  value: tokens(value),
+                  limit: tokens(limit),
+                  agents,
+                })
+              : t("budget.tokensCrossed", {
+                  value: tokens(value),
+                  limit: tokens(limit),
+                }),
+            "error",
+          );
+        }
+      }),
+      listen("settings-changed", () => {
+        qc.invalidateQueries({ queryKey: ["settings"] });
+      }),
     ];
 
     return () => {
       if (timer.current !== null) window.clearTimeout(timer.current);
       unlisten.forEach((p) => p.then((fn) => fn()).catch(() => {}));
     };
-  }, [qc]);
+  }, [qc, notify, t]);
 }

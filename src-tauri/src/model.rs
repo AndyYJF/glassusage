@@ -219,6 +219,17 @@ pub struct UsageFilter {
     pub providers: Option<Vec<String>>,
     pub models: Option<Vec<String>>,
     pub search: Option<String>,
+    /// When true, only rows with `cost_usd IS NULL`.
+    pub unpriced_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonthlyStat {
+    pub month: String,
+    #[serde(flatten)]
+    pub totals: TokenBreakdown,
+    pub by_source: Vec<GroupStat>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -274,6 +285,12 @@ pub struct LiveRates {
     pub per_source: Vec<LiveSource>,
     /// 60 one-second buckets of token counts, oldest first, for the sparkline.
     pub spark60: Vec<i64>,
+    /// Today's cost scoped to the budget-alert agent list (all agents when empty).
+    #[serde(default)]
+    pub budget_cost_today: f64,
+    /// Today's tokens scoped to the budget-alert agent list.
+    #[serde(default)]
+    pub budget_tokens_today: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

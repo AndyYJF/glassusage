@@ -440,6 +440,32 @@ impl Store {
         aggregate_row(&conn, "WHERE ts_ms >= ?1 AND ts_ms < ?2", params![from, to])
     }
 
+    /// Same as [`totals_in_range`], optionally limited to the given agent ids.
+    /// An empty `sources` list means every agent.
+    pub fn totals_in_range_sources(
+        &self,
+        from: i64,
+        to: i64,
+        sources: &[String],
+    ) -> Result<TokenBreakdown> {
+        if sources.is_empty() {
+            return self.totals_in_range(from, to);
+        }
+        let filter = UsageFilter {
+            from: Some(from),
+            to: Some(to),
+            sources: Some(sources.to_vec()),
+            instances: None,
+            providers: None,
+            models: None,
+            search: None,
+            unpriced_only: None,
+        };
+        let (where_sql, args) = filter.to_sql();
+        let conn = self.conn.lock();
+        aggregate_row(&conn, &where_sql, params_from_iter(args.iter()))
+    }
+
     pub fn overview(&self, range: TimeRange) -> Result<OverviewStats> {
         let (today_start, today_end) = day_bounds(0);
         let (yest_start, yest_end) = day_bounds(-1);
@@ -664,6 +690,133 @@ impl Store {
             n += 1;
         }
         Ok(n)
+    }
+
+    /// Month buckets for bookkeeping exports. Keys are local `YYYY-MM`.
+    pub fn monthly_stats(&self, filter: &UsageFilter) -> Result<Vec<MonthlyStat>> {
+        let (where_sql, args) = filter.to_sql();
+        let months: Vec<(String, TokenBreakdown)> = {
+            let conn = self.conn.lock();
+            let sql = format!(
+                "SELECT strftime('%Y-%m', ts_ms/1000, 'unixepoch', 'localtime') AS month,
+                        COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+                        COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
+                        COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cost_usd),0), COUNT(*),
+                        COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END),0)
+                 FROM usage_events {where_sql}
+                 GROUP BY 1
+                 ORDER BY 1"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    TokenBreakdown {
+                        input_tokens: r.get(1)?,
+                        output_tokens: r.get(2)?,
+                        cache_read_tokens: r.get(3)?,
+                        cache_write_tokens: r.get(4)?,
+                        reasoning_tokens: r.get(5)?,
+                        cost_usd: r.get(6)?,
+                        events: r.get(7)?,
+                        unpriced_events: r.get(8)?,
+                        total_tokens: 0,
+                    },
+                ))
+            })?;
+            rows.filter_map(|r| r.ok())
+                .map(|(month, mut totals)| {
+                    totals.total_tokens = totals.input_tokens
+                        + totals.output_tokens
+                        + totals.cache_read_tokens
+                        + totals.cache_write_tokens;
+                    (month, totals)
+                })
+                .collect()
+        };
+
+        let mut out = Vec::with_capacity(months.len());
+        for (month, totals) in months {
+            let by_source = self.monthly_by_source(filter, &month)?;
+            out.push(MonthlyStat {
+                month,
+                totals,
+                by_source,
+            });
+        }
+        Ok(out)
+    }
+
+    fn monthly_by_source(&self, filter: &UsageFilter, month: &str) -> Result<Vec<GroupStat>> {
+        let (where_sql, mut args) = filter.to_sql();
+        args.push(Box::new(month.to_string()));
+        let month_clause = format!(
+            "strftime('%Y-%m', ts_ms/1000, 'unixepoch', 'localtime') = ?{}",
+            args.len()
+        );
+        let full_where = if where_sql.is_empty() {
+            format!("WHERE {month_clause}")
+        } else {
+            format!("{where_sql} AND {month_clause}")
+        };
+        let conn = self.conn.lock();
+        let sql = format!(
+            "SELECT COALESCE(source, '(unknown)'),
+                    SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens),
+                    SUM(cache_write_tokens), SUM(reasoning_tokens),
+                    SUM(COALESCE(cost_usd,0)), COUNT(*),
+                    SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END)
+             FROM usage_events {full_where}
+             GROUP BY 1
+             ORDER BY SUM(input_tokens) + SUM(output_tokens) + SUM(cache_read_tokens)
+                      + SUM(cache_write_tokens) DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                TokenBreakdown {
+                    input_tokens: r.get(1)?,
+                    output_tokens: r.get(2)?,
+                    cache_read_tokens: r.get(3)?,
+                    cache_write_tokens: r.get(4)?,
+                    reasoning_tokens: r.get(5)?,
+                    cost_usd: r.get(6)?,
+                    events: r.get(7)?,
+                    unpriced_events: r.get(8)?,
+                    total_tokens: 0,
+                },
+            ))
+        })?;
+        let mut pairs = Vec::new();
+        let mut grand = 0i64;
+        for row in rows.filter_map(|r| r.ok()) {
+            let (key, mut totals) = row;
+            totals.total_tokens = totals.input_tokens
+                + totals.output_tokens
+                + totals.cache_read_tokens
+                + totals.cache_write_tokens;
+            grand += totals.total_tokens;
+            pairs.push((key, totals));
+        }
+        Ok(pairs
+            .into_iter()
+            .map(|(key, totals)| {
+                let share = if grand > 0 {
+                    totals.total_tokens as f64 / grand as f64
+                } else {
+                    0.0
+                };
+                let unpriced = totals.unpriced_events > 0;
+                GroupStat {
+                    label: key.clone(),
+                    key,
+                    totals,
+                    share,
+                    unpriced,
+                }
+            })
+            .collect())
     }
 
     pub fn agent_stats(&self, source: &str, range: TimeRange) -> Result<AgentStats> {
@@ -986,6 +1139,9 @@ impl UsageFilter {
                 base + 2,
                 base + 3
             ));
+        }
+        if self.unpriced_only == Some(true) {
+            clauses.push("cost_usd IS NULL".into());
         }
 
         if clauses.is_empty() {

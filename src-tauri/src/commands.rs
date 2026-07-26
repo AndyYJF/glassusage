@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::model::*;
 use crate::pricing::ModelPrice;
@@ -142,10 +142,37 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> Res<AppSettings> {
 
 #[tauri::command]
 pub fn set_settings(app: AppHandle, state: State<'_, Arc<AppState>>, patch: serde_json::Value) -> Res<AppSettings> {
+    let prev = state.settings.get();
     let next = state.settings.patch(patch).map_err(err)?;
     // The window backdrop is owned by the OS, so it has to be re-applied here rather
     // than in CSS.
     crate::window::apply_material(&app, &next.material);
+
+    if next.widget_shortcut != prev.widget_shortcut {
+        crate::replace_widget_shortcut(&app, &prev.widget_shortcut, &next.widget_shortcut);
+    }
+
+    if next.autostart != prev.autostart {
+        crate::apply_autostart(&app, next.autostart);
+    }
+
+    if next.widget_compact != prev.widget_compact {
+        crate::window::apply_widget_compact(&app, next.widget_compact);
+    }
+
+    // Changing caps or scope should allow a fresh alert the same day.
+    if next.budget_alerts_enabled != prev.budget_alerts_enabled
+        || (next.daily_cost_budget - prev.daily_cost_budget).abs() > f64::EPSILON
+        || next.daily_token_budget != prev.daily_token_budget
+        || next.budget_alert_sources != prev.budget_alert_sources
+    {
+        state.reset_budget_alert_gate();
+        if next.budget_alerts_enabled {
+            state.check_budget_alerts(&app);
+        }
+    }
+
+    let _ = app.emit("settings-changed", &next);
     Ok(next)
 }
 
@@ -254,6 +281,95 @@ fn csv_field(s: &str) -> String {
     }
 }
 
+fn default_export_path(data_dir: &std::path::Path, stem: &str, ext: &str) -> std::path::PathBuf {
+    let name = format!(
+        "{stem}-{}.{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        ext
+    );
+    dirs::download_dir()
+        .unwrap_or_else(|| data_dir.to_path_buf())
+        .join(name)
+}
+
+#[tauri::command]
+pub fn export_json(state: State<'_, Arc<AppState>>, filter: UsageFilter, path: Option<String>) -> Res<String> {
+    use std::io::Write;
+
+    let target = match path {
+        Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
+        _ => default_export_path(&state.data_dir, "glassusage-export", "json"),
+    };
+
+    let mut rows = Vec::new();
+    state
+        .store
+        .for_each_usage_row(&filter, |r| {
+            let ts = chrono::DateTime::from_timestamp_millis(r.ts_ms)
+                .map(|d| d.with_timezone(&chrono::Local).to_rfc3339())
+                .unwrap_or_default();
+            let total = r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens;
+            rows.push(serde_json::json!({
+                "timestamp": ts,
+                "tsMs": r.ts_ms,
+                "source": r.source,
+                "surface": r.surface,
+                "instance": r.instance,
+                "provider": r.provider,
+                "model": r.model,
+                "modelNorm": r.model_norm,
+                "project": r.project,
+                "sessionId": r.session_id,
+                "inputTokens": r.input_tokens,
+                "outputTokens": r.output_tokens,
+                "cacheReadTokens": r.cache_read_tokens,
+                "cacheWriteTokens": r.cache_write_tokens,
+                "reasoningTokens": r.reasoning_tokens,
+                "totalTokens": total,
+                "costUsd": r.cost_usd,
+                "unpriced": r.unpriced,
+            }));
+        })
+        .map_err(err)?;
+
+    let file = std::fs::File::create(&target).map_err(err)?;
+    let mut w = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut w, &rows).map_err(|e| e.to_string())?;
+    w.flush().map_err(err)?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn export_monthly_report(
+    state: State<'_, Arc<AppState>>,
+    filter: UsageFilter,
+    path: Option<String>,
+) -> Res<String> {
+    use std::io::Write;
+
+    let target = match path {
+        Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
+        _ => default_export_path(&state.data_dir, "glassusage-monthly", "json"),
+    };
+
+    let months = state.store.monthly_stats(&filter).map_err(err)?;
+    let report = serde_json::json!({
+        "generatedAt": chrono::Local::now().to_rfc3339(),
+        "filter": {
+            "from": filter.from,
+            "to": filter.to,
+            "sources": filter.sources,
+        },
+        "months": months,
+    });
+
+    let file = std::fs::File::create(&target).map_err(err)?;
+    let mut w = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut w, &report).map_err(|e| e.to_string())?;
+    w.flush().map_err(err)?;
+    Ok(target.to_string_lossy().to_string())
+}
+
 // ------------------------------------------------------------------ remote instances
 
 #[tauri::command]
@@ -303,8 +419,10 @@ pub async fn sync_remote_instance(app: AppHandle, state: State<'_, Arc<AppState>
 // ------------------------------------------------------------------- widget & live
 
 #[tauri::command]
-pub fn get_live_rates(state: State<'_, Arc<AppState>>) -> Res<LiveRates> {
-    Ok(state.live_rates())
+pub fn get_live_rates(app: AppHandle, state: State<'_, Arc<AppState>>) -> Res<LiveRates> {
+    let rates = state.live_rates();
+    state.check_budget_alerts(&app);
+    Ok(rates)
 }
 
 #[tauri::command]

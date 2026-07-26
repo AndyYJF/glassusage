@@ -1,16 +1,16 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { AlertTriangle, FolderOpen, RefreshCw } from "lucide-react";
 
 import { GlassButton } from "../components/glass/GlassButton";
 import { GlassCard } from "../components/glass/GlassCard";
-import { GlassSegmented } from "../components/glass/GlassSegmented";
+import { RangePicker } from "../components/RangePicker";
 import { CalendarHeatmap } from "../components/charts/CalendarHeatmap";
 import { ShareList } from "../components/charts/ShareList";
 import { UsageChart } from "../components/charts/UsageChart";
 import { api } from "../lib/api";
 import { useAgentStats, useRange, useSourceHealth, useTimeseries } from "../lib/hooks";
-import { useT, rangeKey, statusKey } from "../lib/i18n";
-import { bucketFor, RANGE_KEYS, useUi, type RangeKey } from "../lib/store";
+import { useT, statusKey } from "../lib/i18n";
+import { bucketFor, useUi } from "../lib/store";
 import { fullNumber, percent, relative, tokens, unpricedNote, usd } from "../lib/format";
 import { SOURCE_META, STATUS_CLASS, sourceColor } from "../lib/sources";
 import type { SourceId } from "../lib/types";
@@ -30,20 +30,13 @@ function Metric({ label, value, sub }: { label: string; value: string; sub?: str
 export function AgentDetail({ source }: { source: string }) {
   const { t } = useT();
   const meta = SOURCE_META[source as SourceId];
-  const range = useUi((s) => s.range);
-  const setRange = useUi((s) => s.setRange);
   const notify = useUi((s) => s.notify);
   const [busy, setBusy] = useState(false);
 
-  const { key } = useRange();
+  const { key, from, to } = useRange();
   const { data: stats } = useAgentStats(source);
   const { data: health } = useSourceHealth();
   const { data: series } = useTimeseries("model_norm", undefined, source);
-
-  const rangeOptions = useMemo(
-    () => RANGE_KEYS.map((value) => ({ value, label: t(rangeKey(value)) })),
-    [t],
-  );
 
   const rows = (health ?? []).filter((h) => h.source === source);
   const totals = stats?.totals;
@@ -88,12 +81,7 @@ export function AgentDetail({ source }: { source: string }) {
         </span>
 
         <div className="ml-auto flex items-center gap-2">
-          <GlassSegmented
-            options={rangeOptions}
-            value={range}
-            onChange={(v) => setRange(v as RangeKey)}
-            size="sm"
-          />
+          <RangePicker />
           <GlassButton size="sm" onClick={() => rescan(false)} disabled={busy}>
             <RefreshCw size={13} className={busy ? "animate-spin" : undefined} />
             {t("common.rescan")}
@@ -127,10 +115,10 @@ export function AgentDetail({ source }: { source: string }) {
 
       <GlassCard variant="lens" className="p-4">
         <h2 className="mb-1 text-[0.875rem] font-semibold">{t("agent.byModel")}</h2>
-        <UsageChart data={agentSeries} bucket={bucketFor(key)} colorBy="palette" height={200} />
+        <UsageChart data={agentSeries} bucket={bucketFor(key, from, to)} colorBy="palette" height={200} />
       </GlassCard>
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-3 gap-3">
         <GlassCard variant="lens" className="p-4">
           <h2 className="mb-2 text-[0.875rem] font-semibold">{t("agent.models")}</h2>
           <ShareList items={stats?.perModel ?? []} limit={8} />
@@ -141,6 +129,18 @@ export function AgentDetail({ source }: { source: string }) {
             items={stats?.perProject ?? []}
             limit={8}
             emptyText={t("agent.noProjects")}
+          />
+        </GlassCard>
+        <GlassCard variant="lens" className="p-4">
+          <h2 className="mb-2 text-[0.875rem] font-semibold">{t("agent.byInstance")}</h2>
+          <ShareList
+            items={(stats?.perInstance ?? []).map((row) =>
+              row.key === "local"
+                ? { ...row, label: t("usage.instanceLocal") }
+                : row,
+            )}
+            limit={8}
+            emptyText={t("agent.noInstances")}
           />
         </GlassCard>
       </div>

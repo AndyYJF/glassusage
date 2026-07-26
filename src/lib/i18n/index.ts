@@ -48,14 +48,20 @@ export function rangeKey(range: string): MessageKey {
   switch (range) {
     case "today":
       return "range.today";
+    case "1d":
+      return "range.1d";
     case "7d":
       return "range.7d";
+    case "14d":
+      return "range.14d";
     case "30d":
       return "range.30d";
     case "90d":
       return "range.90d";
     case "all":
       return "range.all";
+    case "custom":
+      return "range.custom";
     default:
       return "range.7d";
   }

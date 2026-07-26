@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
 
 import { LensFilterDefs } from "./components/glass/LensFilterDefs";
+import { Onboarding } from "./components/Onboarding";
 import { Sidebar } from "./components/layout/Sidebar";
 import { TitleBar } from "./components/layout/TitleBar";
 import { Toast } from "./components/layout/Toast";
@@ -113,6 +114,9 @@ export default function App() {
       </div>
 
       <Toast />
+      {settings && !settings.firstRunDone && (
+        <Onboarding onDone={() => {/* settings query invalidated inside */}} />
+      )}
     </div>
   );
 }

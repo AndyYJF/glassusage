@@ -4,14 +4,15 @@ import { Activity, Coins, Gauge, RefreshCw, Zap } from "lucide-react";
 import { GlassButton } from "../components/glass/GlassButton";
 import { GlassCard } from "../components/glass/GlassCard";
 import { GlassSegmented } from "../components/glass/GlassSegmented";
+import { RangePicker } from "../components/RangePicker";
 import { StatTile } from "../components/StatTile";
 import { UsageChart } from "../components/charts/UsageChart";
 import { ShareList } from "../components/charts/ShareList";
 import { SourceStatusGrid } from "../components/SourceStatusGrid";
 import { api } from "../lib/api";
 import { useOverview, useRange, useTimeseries } from "../lib/hooks";
-import { useT, rangeKey, type MessageKey } from "../lib/i18n";
-import { bucketFor, RANGE_KEYS, useUi, type RangeKey } from "../lib/store";
+import { useT, type MessageKey } from "../lib/i18n";
+import { bucketFor, useUi, type RangeKey } from "../lib/store";
 import { delta, fullNumber, percent, tokens, unpricedNote, usd } from "../lib/format";
 import { sourceLabel } from "../lib/sources";
 
@@ -58,25 +59,28 @@ function rangeLabelKeys(key: RangeKey): {
         cache: "dash.cacheAll",
         compare: "common.allTime",
       };
+    case "1d":
+    case "14d":
+    case "custom":
+      return {
+        tokens: "dash.tokensRange",
+        cost: "dash.costRange",
+        cache: "dash.cacheRange",
+        compare: "common.inThisRange",
+      };
   }
 }
 
 export function Dashboard({ onOpenAgent }: { onOpenAgent: (source: string) => void }) {
   const { t } = useT();
-  const range = useUi((s) => s.range);
-  const setRange = useUi((s) => s.setRange);
   const notify = useUi((s) => s.notify);
   const [metric, setMetric] = useState<"tokens" | "cost">("tokens");
   const [rescanning, setRescanning] = useState(false);
 
-  const { key } = useRange();
+  const { key, from, to } = useRange();
   const { data: overview, isLoading } = useOverview();
   const { data: series } = useTimeseries("source");
 
-  const rangeOptions = useMemo(
-    () => RANGE_KEYS.map((value) => ({ value, label: t(rangeKey(value)) })),
-    [t],
-  );
   const metrics = useMemo(
     () => [
       { value: "tokens" as const, label: t("common.tokens") },
@@ -122,12 +126,7 @@ export function Dashboard({ onOpenAgent }: { onOpenAgent: (source: string) => vo
       <div className="flex shrink-0 items-center gap-3">
         <h1 className="text-[1.05rem] font-semibold tracking-tight">{t("dash.title")}</h1>
         <div className="ml-auto flex items-center gap-2">
-          <GlassSegmented
-            options={rangeOptions}
-            value={range}
-            onChange={(v) => setRange(v as RangeKey)}
-            size="sm"
-          />
+          <RangePicker />
           <GlassButton
             size="sm"
             onClick={rescan}
@@ -204,7 +203,7 @@ export function Dashboard({ onOpenAgent }: { onOpenAgent: (source: string) => vo
           </div>
           <UsageChart
             data={series ?? []}
-            bucket={bucketFor(key)}
+            bucket={bucketFor(key, from, to)}
             metric={metric}
             colorBy="source"
             height={264}
