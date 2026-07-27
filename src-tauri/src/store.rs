@@ -4,7 +4,7 @@
 //! enforced by `UNIQUE(source, instance, dedup_key)` so a collector may re-scan the same
 //! region of a log without inflating totals.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -154,26 +154,39 @@ impl Store {
     /// re-reading a streamed Claude message whose token count grew must contribute only
     /// the increment to the live rate window, never the full total a second time.
     pub fn insert_events(&self, events: &[UsageEvent], mode: WriteMode) -> Result<InsertOutcome> {
-        if events.is_empty() {
+        self.ingest_scan(events, mode, &[])
+    }
+
+    /// Persist a collector result and its watermarks as one transaction.
+    pub fn ingest_scan(
+        &self,
+        events: &[UsageEvent],
+        mode: WriteMode,
+        states: &[PendingScanState],
+    ) -> Result<InsertOutcome> {
+        if events.is_empty() && states.is_empty() {
             return Ok(InsertOutcome::default());
         }
         let mut conn = self.conn.lock();
 
         // Snapshot the totals of any rows this batch will overwrite.
-        let mut prior: HashMap<(String, String, String), i64> = HashMap::new();
+        let mut prior: HashMap<(String, String, String), (i64, i64)> = HashMap::new();
         if mode == WriteMode::Upsert {
             let mut stmt = conn.prepare_cached(
-                "SELECT input_tokens + output_tokens + cache_read_tokens + cache_write_tokens
+                "SELECT input_tokens + output_tokens + cache_read_tokens + cache_write_tokens,
+                        ts_ms
                  FROM usage_events WHERE source=?1 AND instance=?2 AND dedup_key=?3",
             )?;
             for e in events {
-                if let Ok(total) = stmt.query_row(
-                    params![e.source, e.instance, e.dedup_key],
-                    |r| r.get::<_, i64>(0),
-                ) {
+                if let Some(existing) = stmt
+                    .query_row(params![e.source, e.instance, e.dedup_key], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                    })
+                    .optional()?
+                {
                     prior.insert(
                         (e.source.clone(), e.instance.clone(), e.dedup_key.clone()),
-                        total,
+                        existing,
                     );
                 }
             }
@@ -181,6 +194,8 @@ impl Store {
 
         let tx = conn.transaction()?;
         let mut accepted = Vec::new();
+        let mut running_totals = prior.clone();
+        let mut delta_bases = Vec::new();
         {
             let sql = match mode {
                 WriteMode::InsertOrIgnore => {
@@ -206,10 +221,19 @@ impl Store {
                        cache_write_tokens=excluded.cache_write_tokens,
                        reasoning_tokens=excluded.reasoning_tokens,
                        cost_usd=excluded.cost_usd
-                     WHERE excluded.input_tokens != usage_events.input_tokens
-                        OR excluded.output_tokens != usage_events.output_tokens
-                        OR excluded.cache_read_tokens != usage_events.cache_read_tokens
-                        OR excluded.cache_write_tokens != usage_events.cache_write_tokens"
+                      WHERE excluded.input_tokens != usage_events.input_tokens
+                         OR excluded.output_tokens != usage_events.output_tokens
+                         OR excluded.cache_read_tokens != usage_events.cache_read_tokens
+                         OR excluded.cache_write_tokens != usage_events.cache_write_tokens
+                         OR excluded.reasoning_tokens != usage_events.reasoning_tokens
+                         OR excluded.surface IS NOT usage_events.surface
+                         OR excluded.session_id IS NOT usage_events.session_id
+                         OR excluded.project IS NOT usage_events.project
+                         OR excluded.model IS NOT usage_events.model
+                         OR excluded.model_norm IS NOT usage_events.model_norm
+                         OR excluded.provider IS NOT usage_events.provider
+                         OR excluded.ts_ms != usage_events.ts_ms
+                         OR excluded.cost_usd IS NOT usage_events.cost_usd"
                 }
             };
             let mut stmt = tx.prepare_cached(sql)?;
@@ -233,28 +257,62 @@ impl Store {
                     e.dedup_key,
                 ])?;
                 if changed > 0 {
+                    let key = (e.source.clone(), e.instance.clone(), e.dedup_key.clone());
+                    let existing = running_totals.get(&key);
+                    let before = existing.map(|(total, _)| *total).unwrap_or(0);
+                    delta_bases.push((before, existing.is_none()));
+                    running_totals.insert(key, (e.total_tokens(), e.timestamp));
                     accepted.push(e.clone());
                 }
             }
         }
-        tx.commit()?;
-        if !accepted.is_empty() {
-            self.rebuild_rollup_days_locked(&mut conn, &days_touched(&accepted))?;
+
+        for pending in states {
+            tx.execute(
+                "INSERT INTO scan_state (source, instance, key, offset, mtime_ms, extra)
+                 VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(source, instance, key) DO UPDATE SET
+                   offset=excluded.offset, mtime_ms=excluded.mtime_ms, extra=excluded.extra",
+                params![
+                    pending.source,
+                    pending.instance,
+                    pending.key,
+                    pending.state.offset,
+                    pending.state.mtime_ms,
+                    pending.state.extra
+                ],
+            )?;
         }
+
+        let mut touched: HashSet<String> = days_touched(&accepted).into_iter().collect();
+        for event in &accepted {
+            if let Some((_, old_ts)) = prior.get(&(
+                event.source.clone(),
+                event.instance.clone(),
+                event.dedup_key.clone(),
+            )) {
+                if let Some(day) = day_for_timestamp(*old_ts) {
+                    touched.insert(day);
+                }
+            }
+        }
+        let mut touched: Vec<String> = touched.into_iter().collect();
+        touched.sort();
+        if !touched.is_empty() {
+            rebuild_rollup_days_tx(&tx, &touched)?;
+        }
+        tx.commit()?;
 
         let deltas = accepted
             .iter()
-            .map(|e| {
-                let before = prior
-                    .get(&(e.source.clone(), e.instance.clone(), e.dedup_key.clone()))
-                    .copied()
-                    .unwrap_or(0);
+            .zip(delta_bases)
+            .map(|(e, (before, is_new_request))| {
                 LiveDelta {
                     ts_ms: e.timestamp,
                     source: e.source.clone(),
                     tokens: (e.total_tokens() - before).max(0),
                     // A grown row is the same call reported again, not a new request.
-                    is_new_request: before == 0,
+                    is_new_request,
                 }
             })
             .collect();
@@ -264,32 +322,6 @@ impl Store {
             deltas,
             events: accepted,
         })
-    }
-
-    /// Recompute `daily_rollup` for just the days a batch touched, so the trend chart
-    /// stays correct after an UPSERT changes an existing row's totals.
-    fn rebuild_rollup_days_locked(&self, conn: &mut Connection, days: &[String]) -> Result<()> {
-        let tx = conn.transaction()?;
-        for day in days {
-            tx.execute("DELETE FROM daily_rollup WHERE day = ?1", params![day])?;
-            tx.execute(
-                r#"
-                INSERT INTO daily_rollup
-                  (day, source, model_norm, input_tokens, output_tokens, cache_read_tokens,
-                   cache_write_tokens, reasoning_tokens, cost_usd, events)
-                SELECT date(ts_ms/1000, 'unixepoch', 'localtime') AS d, source, model_norm,
-                       SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens),
-                       SUM(cache_write_tokens), SUM(reasoning_tokens),
-                       SUM(COALESCE(cost_usd, 0)), COUNT(*)
-                FROM usage_events
-                WHERE date(ts_ms/1000, 'unixepoch', 'localtime') = ?1
-                GROUP BY d, source, model_norm
-                "#,
-                params![day],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
     }
 
     pub fn rebuild_all_rollups(&self) -> Result<()> {
@@ -333,7 +365,13 @@ impl Store {
         .flatten()
     }
 
-    pub fn set_scan_state(&self, source: &str, instance: &str, key: &str, st: &ScanState) -> Result<()> {
+    pub fn set_scan_state(
+        &self,
+        source: &str,
+        instance: &str,
+        key: &str,
+        st: &ScanState,
+    ) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO scan_state (source, instance, key, offset, mtime_ms, extra)
@@ -396,7 +434,9 @@ impl Store {
              FROM source_status ORDER BY source, instance",
         )?;
         let rows = stmt.query_map([], |r| {
-            let detected: String = r.get::<_, Option<String>>(6)?.unwrap_or_else(|| "[]".into());
+            let detected: String = r
+                .get::<_, Option<String>>(6)?
+                .unwrap_or_else(|| "[]".into());
             Ok(SourceHealth {
                 source: r.get(0)?,
                 instance: r.get(1)?,
@@ -410,7 +450,7 @@ impl Store {
                 skipped_rows: r.get(5)?,
             })
         })?;
-        let mut out: Vec<SourceHealth> = rows.filter_map(|r| r.ok()).collect();
+        let mut out: Vec<SourceHealth> = rows.collect::<rusqlite::Result<_>>()?;
 
         let mut counts = conn.prepare(
             "SELECT source, instance, COUNT(*), MAX(ts_ms) FROM usage_events GROUP BY source, instance",
@@ -422,8 +462,7 @@ impl Store {
                     (r.get::<_, i64>(2)?, r.get::<_, i64>(3)?),
                 ))
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<_>>()?;
         for h in &mut out {
             if let Some((count, last)) = map.get(&(h.source.clone(), h.instance.clone())) {
                 h.event_count = *count;
@@ -478,11 +517,14 @@ impl Store {
         let last_week = self.totals_in_range(lweek_start, lweek_end)?;
         let range_totals = self.totals_in_range(range.from, range.to)?;
 
-        let per_source = self.group_stats("source", &UsageFilter {
-            from: Some(range.from),
-            to: Some(range.to),
-            ..Default::default()
-        })?;
+        let per_source = self.group_stats(
+            "source",
+            &UsageFilter {
+                from: Some(range.from),
+                to: Some(range.to),
+                ..Default::default()
+            },
+        )?;
 
         Ok(OverviewStats {
             today,
@@ -534,8 +576,8 @@ impl Store {
         })?;
 
         let mut out: Vec<GroupStat> = Vec::new();
-        for row in rows.filter_map(|r| r.ok()) {
-            let (key, mut totals, unpriced) = row;
+        for row in rows {
+            let (key, mut totals, unpriced) = row?;
             totals.total_tokens = totals.input_tokens
                 + totals.output_tokens
                 + totals.cache_read_tokens
@@ -597,7 +639,11 @@ impl Store {
             }
             _ => "unixepoch(date(ts_ms/1000, 'unixepoch', 'localtime'), 'utc')",
         };
-        let source_sql = if source.is_some() { " AND source = ?3" } else { "" };
+        let source_sql = if source.is_some() {
+            " AND source = ?3"
+        } else {
+            ""
+        };
         let conn = self.conn.lock();
         let sql = format!(
             "SELECT CAST({bucket_expr} AS INTEGER) AS b, COALESCE({group_col}, '(unknown)') AS k,
@@ -638,10 +684,15 @@ impl Store {
                 totals,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn usage_log(&self, filter: &UsageFilter, page: i64, page_size: i64) -> Result<Page<UsageRow>> {
+    pub fn usage_log(
+        &self,
+        filter: &UsageFilter,
+        page: i64,
+        page_size: i64,
+    ) -> Result<Page<UsageRow>> {
         let (where_sql, args) = filter.to_sql();
         let conn = self.conn.lock();
 
@@ -651,19 +702,20 @@ impl Store {
             |r| r.get(0),
         )?;
 
+        let page_size = page_size.clamp(1, 5000);
         let sql = format!(
             "SELECT id, ts_ms, source, surface, instance, provider, model, model_norm, project,
                     session_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
                     reasoning_tokens, cost_usd
              FROM usage_events {where_sql}
              ORDER BY ts_ms DESC, id DESC LIMIT {limit} OFFSET {offset}",
-            limit = page_size.clamp(1, 5000),
-            offset = (page.max(0)) * page_size.clamp(1, 5000)
+            limit = page_size,
+            offset = (page.max(0)) * page_size
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(args.iter()), map_usage_row)?;
         Ok(Page {
-            rows: rows.filter_map(|r| r.ok()).collect(),
+            rows: rows.collect::<rusqlite::Result<_>>()?,
             total,
             page,
             page_size,
@@ -672,7 +724,11 @@ impl Store {
 
     /// Full result set for CSV export, streamed through a callback so a 10^6-row export
     /// never materializes in memory.
-    pub fn for_each_usage_row(&self, filter: &UsageFilter, mut f: impl FnMut(&UsageRow)) -> Result<i64> {
+    pub fn for_each_usage_row(
+        &self,
+        filter: &UsageFilter,
+        mut f: impl FnMut(&UsageRow),
+    ) -> Result<i64> {
         let (where_sql, args) = filter.to_sql();
         let conn = self.conn.lock();
         let sql = format!(
@@ -724,7 +780,8 @@ impl Store {
                     },
                 ))
             })?;
-            rows.filter_map(|r| r.ok())
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
                 .map(|(month, mut totals)| {
                     totals.total_tokens = totals.input_tokens
                         + totals.output_tokens
@@ -790,8 +847,8 @@ impl Store {
         })?;
         let mut pairs = Vec::new();
         let mut grand = 0i64;
-        for row in rows.filter_map(|r| r.ok()) {
-            let (key, mut totals) = row;
+        for row in rows {
+            let (key, mut totals) = row?;
             totals.total_tokens = totals.input_tokens
                 + totals.output_tokens
                 + totals.cache_read_tokens
@@ -846,8 +903,10 @@ impl Store {
                 "SELECT day, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens)
                  FROM daily_rollup WHERE source = ?1 GROUP BY day ORDER BY day",
             )?;
-            let rows = stmt.query_map(params![source], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-            rows.filter_map(|r| r.ok()).collect()
+            let rows = stmt.query_map(params![source], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
 
         Ok(AgentStats {
@@ -870,7 +929,7 @@ impl Store {
             "SELECT DISTINCT {column} FROM usage_events WHERE {column} IS NOT NULL ORDER BY 1"
         ))?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Events since a timestamp, used to warm the live-rate ring buffer at startup.
@@ -881,65 +940,101 @@ impl Store {
              FROM usage_events WHERE ts_ms >= ?1 ORDER BY ts_ms",
         )?;
         let rows = stmt.query_map(params![since_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn delete_source(&self, source: &str, instance: Option<&str>) -> Result<()> {
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
+        let days = {
+            match instance {
+                Some(instance) => {
+                    let mut stmt = conn.prepare(
+                        "SELECT DISTINCT date(ts_ms/1000, 'unixepoch', 'localtime')
+                         FROM usage_events WHERE source=?1 AND instance=?2",
+                    )?;
+                    let rows =
+                        stmt.query_map(params![source, instance], |row| row.get::<_, String>(0))?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                }
+                None => {
+                    let mut stmt = conn.prepare(
+                        "SELECT DISTINCT date(ts_ms/1000, 'unixepoch', 'localtime')
+                         FROM usage_events WHERE source=?1",
+                    )?;
+                    let rows = stmt.query_map(params![source], |row| row.get::<_, String>(0))?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                }
+            }
+        };
+        let tx = conn.transaction()?;
         match instance {
-            Some(i) => conn.execute(
+            Some(i) => tx.execute(
                 "DELETE FROM usage_events WHERE source=?1 AND instance=?2",
                 params![source, i],
             )?,
-            None => conn.execute("DELETE FROM usage_events WHERE source=?1", params![source])?,
+            None => tx.execute("DELETE FROM usage_events WHERE source=?1", params![source])?,
         };
+        rebuild_rollup_days_tx(&tx, &days)?;
+        tx.commit()?;
         Ok(())
     }
 
     /// Re-price rows after the price table or a user override changes.
     pub fn reprice(&self, pricer: &crate::pricing::Pricing) -> Result<usize> {
         let mut conn = self.conn.lock();
-        let rows: Vec<(i64, String, String, i64, i64, i64, i64, bool)> = {
+        let changes = {
             let mut stmt = conn.prepare(
                 "SELECT id, source, model_norm, input_tokens, output_tokens, cache_read_tokens,
-                        cache_write_tokens, cost_usd IS NULL
+                        cache_write_tokens, cost_usd, ts_ms
                  FROM usage_events",
             )?;
             let it = stmt.query_map([], |r| {
                 Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get::<_, i64>(7)? == 1,
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, Option<f64>>(7)?,
+                    r.get::<_, i64>(8)?,
                 ))
             })?;
-            it.filter_map(|r| r.ok()).collect()
-        };
-
-        let tx = conn.transaction()?;
-        let mut updated = 0;
-        {
-            let mut stmt = tx.prepare_cached("UPDATE usage_events SET cost_usd = ?1 WHERE id = ?2")?;
-            for (id, source, model, input, output, cread, cwrite, _) in rows {
-                // Sources that report authoritative cost (Hermes actual, Cursor cents) keep it.
+            let mut changes = Vec::new();
+            for row in it {
+                let (id, source, model, input, output, cread, cwrite, old_cost, ts_ms) = row?;
                 if crate::pricing::source_has_native_cost(&source) {
                     continue;
                 }
                 let cost = pricer.cost(&model, input, output, cread, cwrite);
+                if cost != old_cost {
+                    changes.push((id, cost, ts_ms));
+                }
+            }
+            changes
+        };
+        if changes.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = conn.transaction()?;
+        let mut touched = HashSet::new();
+        {
+            let mut stmt =
+                tx.prepare_cached("UPDATE usage_events SET cost_usd = ?1 WHERE id = ?2")?;
+            for (id, cost, ts_ms) in &changes {
                 stmt.execute(params![cost, id])?;
-                updated += 1;
+                if let Some(day) = day_for_timestamp(*ts_ms) {
+                    touched.insert(day);
+                }
             }
         }
+        let mut touched: Vec<String> = touched.into_iter().collect();
+        touched.sort();
+        rebuild_rollup_days_tx(&tx, &touched)?;
         tx.commit()?;
-        // `rebuild_all_rollups` takes the connection lock itself, and parking_lot's mutex
-        // is not reentrant, so the guard has to be released before calling it.
-        drop(conn);
-        self.rebuild_all_rollups()?;
-        Ok(updated)
+        Ok(changes.len())
     }
 
     // -------------------------------------------------------- remote instances
@@ -968,10 +1063,14 @@ impl Store {
                 has_secret: r.get::<_, i64>(12)? == 1,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn upsert_remote(&self, inst: &crate::remote::RemoteInstance, secret: Option<Vec<u8>>) -> Result<()> {
+    pub fn upsert_remote(
+        &self,
+        inst: &crate::remote::RemoteInstance,
+        secret: Option<Vec<u8>>,
+    ) -> Result<()> {
         let conn = self.conn.lock();
         // A None secret means "leave the stored one alone", so editing an instance without
         // retyping the password does not wipe it.
@@ -989,9 +1088,19 @@ impl Store {
                    poll_secs=excluded.poll_secs, import_archives=excluded.import_archives,
                    enabled=excluded.enabled",
                 params![
-                    inst.name, inst.agent, inst.host, inst.port, inst.username, inst.auth_mode,
-                    inst.key_path, sec, inst.remote_home, inst.remote_path, inst.poll_secs,
-                    inst.import_archives as i64, inst.enabled as i64
+                    inst.name,
+                    inst.agent,
+                    inst.host,
+                    inst.port,
+                    inst.username,
+                    inst.auth_mode,
+                    inst.key_path,
+                    sec,
+                    inst.remote_home,
+                    inst.remote_path,
+                    inst.poll_secs,
+                    inst.import_archives as i64,
+                    inst.enabled as i64
                 ],
             )?;
         } else {
@@ -1007,9 +1116,18 @@ impl Store {
                    remote_path=excluded.remote_path, poll_secs=excluded.poll_secs,
                    import_archives=excluded.import_archives, enabled=excluded.enabled",
                 params![
-                    inst.name, inst.agent, inst.host, inst.port, inst.username, inst.auth_mode,
-                    inst.key_path, inst.remote_home, inst.remote_path, inst.poll_secs,
-                    inst.import_archives as i64, inst.enabled as i64
+                    inst.name,
+                    inst.agent,
+                    inst.host,
+                    inst.port,
+                    inst.username,
+                    inst.auth_mode,
+                    inst.key_path,
+                    inst.remote_home,
+                    inst.remote_path,
+                    inst.poll_secs,
+                    inst.import_archives as i64,
+                    inst.enabled as i64
                 ],
             )?;
         }
@@ -1029,11 +1147,31 @@ impl Store {
     }
 
     pub fn delete_remote(&self, name: &str) -> Result<()> {
-        let conn = self.conn.lock();
-        conn.execute("DELETE FROM remote_instances WHERE name = ?1", params![name])?;
-        conn.execute("DELETE FROM usage_events WHERE instance = ?1", params![name])?;
-        conn.execute("DELETE FROM scan_state WHERE instance = ?1", params![name])?;
-        conn.execute("DELETE FROM source_status WHERE instance = ?1", params![name])?;
+        let mut conn = self.conn.lock();
+        let days = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT date(ts_ms/1000, 'unixepoch', 'localtime')
+                 FROM usage_events WHERE instance=?1",
+            )?;
+            let rows = stmt.query_map(params![name], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM remote_instances WHERE name = ?1",
+            params![name],
+        )?;
+        tx.execute(
+            "DELETE FROM usage_events WHERE instance = ?1",
+            params![name],
+        )?;
+        tx.execute("DELETE FROM scan_state WHERE instance = ?1", params![name])?;
+        tx.execute(
+            "DELETE FROM source_status WHERE instance = ?1",
+            params![name],
+        )?;
+        rebuild_rollup_days_tx(&tx, &days)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1070,7 +1208,11 @@ fn map_usage_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRow> {
     })
 }
 
-fn aggregate_row(conn: &Connection, where_sql: &str, args: impl rusqlite::Params) -> Result<TokenBreakdown> {
+fn aggregate_row(
+    conn: &Connection,
+    where_sql: &str,
+    args: impl rusqlite::Params,
+) -> Result<TokenBreakdown> {
     let sql = format!(
         "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
                 COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
@@ -1159,23 +1301,50 @@ pub fn now_ms() -> i64 {
 fn days_touched(events: &[UsageEvent]) -> Vec<String> {
     let mut days: Vec<String> = events
         .iter()
-        .filter_map(|e| {
-            Local
-                .timestamp_millis_opt(e.timestamp)
-                .single()
-                .map(|d| d.format("%Y-%m-%d").to_string())
-        })
+        .filter_map(|e| day_for_timestamp(e.timestamp))
         .collect();
     days.sort();
     days.dedup();
     days
 }
 
+fn day_for_timestamp(timestamp: i64) -> Option<String> {
+    Local
+        .timestamp_millis_opt(timestamp)
+        .single()
+        .map(|d| d.format("%Y-%m-%d").to_string())
+}
+
+fn rebuild_rollup_days_tx(tx: &rusqlite::Transaction<'_>, days: &[String]) -> Result<()> {
+    for day in days {
+        tx.execute("DELETE FROM daily_rollup WHERE day = ?1", params![day])?;
+        tx.execute(
+            r#"
+            INSERT INTO daily_rollup
+              (day, source, model_norm, input_tokens, output_tokens, cache_read_tokens,
+               cache_write_tokens, reasoning_tokens, cost_usd, events)
+            SELECT date(ts_ms/1000, 'unixepoch', 'localtime') AS d, source, model_norm,
+                   SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens),
+                   SUM(cache_write_tokens), SUM(reasoning_tokens),
+                   SUM(COALESCE(cost_usd, 0)), COUNT(*)
+            FROM usage_events
+            WHERE date(ts_ms/1000, 'unixepoch', 'localtime') = ?1
+            GROUP BY d, source, model_norm
+            "#,
+            params![day],
+        )?;
+    }
+    Ok(())
+}
+
 /// Local-midnight boundaries for `today + offset_days`.
 pub fn day_bounds(offset_days: i64) -> (i64, i64) {
     let today = Local::now().date_naive();
     let day = today + chrono::Duration::days(offset_days);
-    (start_of_day(day), start_of_day(day + chrono::Duration::days(1)))
+    (
+        start_of_day(day),
+        start_of_day(day + chrono::Duration::days(1)),
+    )
 }
 
 /// Monday-based week boundaries for `this week + offset_weeks`.
@@ -1183,7 +1352,10 @@ pub fn week_bounds(offset_weeks: i64) -> (i64, i64) {
     let today = Local::now().date_naive();
     let monday = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64)
         + chrono::Duration::weeks(offset_weeks);
-    (start_of_day(monday), start_of_day(monday + chrono::Duration::weeks(1)))
+    (
+        start_of_day(monday),
+        start_of_day(monday + chrono::Duration::weeks(1)),
+    )
 }
 
 fn start_of_day(d: NaiveDate) -> i64 {
@@ -1193,4 +1365,177 @@ fn start_of_day(d: NaiveDate) -> i64 {
         .single()
         .map(|dt: DateTime<Local>| dt.timestamp_millis())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temporary_store(label: &str) -> (Store, PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "glassusage-{label}-{}-{}.db",
+            std::process::id(),
+            now_ms()
+        ));
+        (Store::open(&path).expect("open temporary store"), path)
+    }
+
+    fn event(key: &str, timestamp: i64) -> UsageEvent {
+        let mut event = UsageEvent::new("opencode", "cli", "local", key.to_string());
+        event.model = "test-model".into();
+        event.model_norm = "test-model".into();
+        event.timestamp = timestamp;
+        event.input_tokens = 10;
+        event.output_tokens = 5;
+        event.cost_usd = Some(0.25);
+        event
+    }
+
+    fn cleanup(store: Store, path: PathBuf) {
+        drop(store);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(path.with_extension("db-wal")).ok();
+        std::fs::remove_file(path.with_extension("db-shm")).ok();
+    }
+
+    #[test]
+    fn failed_event_write_does_not_advance_watermark() {
+        let (store, path) = temporary_store("atomic-watermark");
+        {
+            let conn = store.conn.lock();
+            conn.execute_batch(
+                "CREATE TRIGGER reject_usage BEFORE INSERT ON usage_events
+                 BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+            )
+            .unwrap();
+        }
+        let timestamp = Local
+            .with_ymd_and_hms(2025, 1, 10, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let pending = PendingScanState {
+            source: "opencode".into(),
+            instance: "local".into(),
+            key: "db".into(),
+            state: ScanState {
+                offset: 42,
+                mtime_ms: timestamp,
+                extra: None,
+            },
+        };
+
+        assert!(store
+            .ingest_scan(&[event("one", timestamp)], WriteMode::Upsert, &[pending])
+            .is_err());
+        assert!(store.get_scan_state("opencode", "local", "db").is_none());
+        cleanup(store, path);
+    }
+
+    #[test]
+    fn upsert_updates_non_token_fields_and_both_rollup_days() {
+        let (store, path) = temporary_store("upsert-rollup");
+        let first_ts = Local
+            .with_ymd_and_hms(2025, 1, 10, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let second_ts = Local
+            .with_ymd_and_hms(2025, 1, 11, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        store
+            .insert_events(&[event("same", first_ts)], WriteMode::Upsert)
+            .unwrap();
+
+        let mut changed = event("same", second_ts);
+        changed.reasoning_tokens = 3;
+        changed.cost_usd = Some(0.75);
+        let outcome = store.insert_events(&[changed], WriteMode::Upsert).unwrap();
+        assert_eq!(outcome.changed, 1);
+
+        let conn = store.conn.lock();
+        let old_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM daily_rollup WHERE day='2025-01-10'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (reasoning, cost): (i64, f64) = conn
+            .query_row(
+                "SELECT reasoning_tokens, cost_usd FROM daily_rollup WHERE day='2025-01-11'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(old_count, 0);
+        assert_eq!(reasoning, 3);
+        assert!((cost - 0.75).abs() < f64::EPSILON);
+        cleanup(store, path);
+    }
+
+    #[test]
+    fn deleting_source_rebuilds_affected_rollup() {
+        let (store, path) = temporary_store("delete-rollup");
+        let timestamp = Local
+            .with_ymd_and_hms(2025, 1, 10, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let first = event("first", timestamp);
+        let mut second = event("second", timestamp);
+        second.source = "claude".into();
+        store
+            .insert_events(&[first, second], WriteMode::InsertOrIgnore)
+            .unwrap();
+        store.delete_source("opencode", None).unwrap();
+
+        let conn = store.conn.lock();
+        let opencode: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM daily_rollup WHERE source='opencode'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let claude: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM daily_rollup WHERE source='claude'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(opencode, 0);
+        assert_eq!(claude, 1);
+        cleanup(store, path);
+    }
+
+    #[test]
+    fn repeated_upserts_in_one_batch_emit_incremental_live_deltas() {
+        let (store, path) = temporary_store("batch-live-deltas");
+        let timestamp = Local
+            .with_ymd_and_hms(2025, 1, 10, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let mut first = event("same", timestamp);
+        first.input_tokens = 10;
+        let mut second = first.clone();
+        second.input_tokens = 15;
+
+        let outcome = store
+            .insert_events(&[first, second], WriteMode::Upsert)
+            .unwrap();
+        assert_eq!(outcome.changed, 2);
+        assert_eq!(outcome.deltas.len(), 2);
+        assert_eq!(outcome.deltas[0].tokens, 15);
+        assert!(outcome.deltas[0].is_new_request);
+        assert_eq!(outcome.deltas[1].tokens, 5);
+        assert!(!outcome.deltas[1].is_new_request);
+        cleanup(store, path);
+    }
 }

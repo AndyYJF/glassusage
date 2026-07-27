@@ -58,21 +58,22 @@ export function Odometer({ value, className }: Props) {
   }
 
   return (
-    <span
-      className={clsx(
-        "tnum inline-flex h-[1em] items-center leading-none align-top",
-        className,
-      )}
-    >
-      {value.split("").map((ch, i) =>
-        ch >= "0" && ch <= "9" ? (
-          // Index keys are correct here: position in the number is the identity that
-          // matters, so the hundreds column keeps rolling as the hundreds column.
-          <DigitColumn key={i} digit={Number(ch)} />
-        ) : (
-          <GlyphCell key={i}>{ch}</GlyphCell>
-        ),
-      )}
+    <span className={clsx("tnum relative inline-block h-[1em] align-top", className)}>
+      <span className="sr-only">{value}</span>
+      <span
+        aria-hidden="true"
+        className="inline-flex h-[1em] items-center leading-none"
+      >
+        {value.split("").map((ch, i) =>
+          ch >= "0" && ch <= "9" ? (
+            // Index keys are correct here: position in the number is the identity that
+            // matters, so the hundreds column keeps rolling as the hundreds column.
+            <DigitColumn key={i} digit={Number(ch)} />
+          ) : (
+            <GlyphCell key={i}>{ch}</GlyphCell>
+          ),
+        )}
+      </span>
     </span>
   );
 }

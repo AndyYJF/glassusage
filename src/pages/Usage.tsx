@@ -78,6 +78,7 @@ export function UsagePage() {
   const { from, to } = useRange();
   const [page, setPage] = useState(0);
   const [groupBy, setGroupBy] = useState<GroupBy>("model_norm");
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [exportOpen, setExportOpen] = useState(false);
   const [priceDrafts, setPriceDrafts] = useState<Record<string, { in: string; out: string }>>({});
@@ -95,6 +96,11 @@ export function UsagePage() {
 
   const unpricedOnly = Boolean(filter.unpricedOnly);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearch(searchInput), 300);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
   const effective = useMemo(
     () => ({
       ...filter,
@@ -111,7 +117,7 @@ export function UsagePage() {
   const { data: unpricedModels } = useGroupStats("model_norm", {
     ...effective,
     unpricedOnly: true,
-  });
+  }, { enabled: unpricedOnly });
   const { data: options } = useFilterOptions();
 
   useEffect(() => {
@@ -181,7 +187,7 @@ export function UsagePage() {
 
   const totalPages = Math.max(1, Math.ceil((log?.total ?? 0) / PAGE_SIZE));
   const hasFilters =
-    Boolean(search) ||
+    Boolean(searchInput) ||
     unpricedOnly ||
     Boolean(
       filter.sources?.length ||
@@ -238,9 +244,9 @@ export function UsagePage() {
           <div className="glass-quiet flex min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5">
             <Search size={13} className="shrink-0 text-[rgb(var(--text-faint))]" />
             <input
-              value={search}
+              value={searchInput}
               onChange={(e) => {
-                setSearch(e.target.value);
+                setSearchInput(e.target.value);
                 setPage(0);
               }}
               placeholder={t("usage.search")}
@@ -264,6 +270,7 @@ export function UsagePage() {
               tone="ghost"
               onClick={() => {
                 resetFilter();
+                setSearchInput("");
                 setSearch("");
                 setPage(0);
               }}
@@ -289,7 +296,7 @@ export function UsagePage() {
         />
         <FilterChips
           label={t("usage.model")}
-          options={(options?.model_norm ?? []).slice(0, 18)}
+          options={options?.model_norm ?? []}
           selected={filter.models}
           onToggle={(v) => toggle("models", v)}
         />

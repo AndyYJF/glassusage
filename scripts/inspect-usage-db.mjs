@@ -12,9 +12,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+const roaming = path.join(os.homedir(), "AppData", "Roaming");
+const currentFile = path.join(roaming, "com.glassusage.desktop", "usage.db");
+const legacyFile = path.join(roaming, "com.glassusage.app", "usage.db");
 const file =
   process.argv[2] ??
-  path.join(os.homedir(), "AppData", "Roaming", "com.glassusage.app", "usage.db");
+  (fs.existsSync(currentFile) ? currentFile : legacyFile);
 
 if (!fs.existsSync(file)) {
   console.log(`missing: ${file}`);

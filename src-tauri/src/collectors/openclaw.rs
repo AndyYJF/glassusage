@@ -65,7 +65,10 @@ impl Collector for OpenClawCollector {
     }
 
     fn detect(&self, settings: &AppSettings) -> Vec<PathBuf> {
-        Self::roots(settings).iter().flat_map(|r| Self::databases_under(r)).collect()
+        Self::roots(settings)
+            .iter()
+            .flat_map(|r| Self::databases_under(r))
+            .collect()
     }
 
     fn watch_paths(&self, settings: &AppSettings) -> Vec<PathBuf> {
@@ -80,7 +83,9 @@ impl Collector for OpenClawCollector {
         let mut report = ScanReport::default();
 
         for root in &roots {
-            report.detected_paths.push(root.to_string_lossy().to_string());
+            report
+                .detected_paths
+                .push(root.to_string_lossy().to_string());
 
             for db in Self::databases_under(root) {
                 report.files_seen += 1;
@@ -99,8 +104,12 @@ impl Collector for OpenClawCollector {
                 report.files_seen += 1;
                 let key = format!("jsonl:{}", jsonl.to_string_lossy());
                 let mtime = mtime_ms(&jsonl);
-                let size = std::fs::metadata(&jsonl).map(|m| m.len() as i64).unwrap_or(0);
-                if let Some(prev) = ctx.store.get_scan_state(source::OPENCLAW, &ctx.instance, &key)
+                let size = std::fs::metadata(&jsonl)
+                    .map(|m| m.len() as i64)
+                    .unwrap_or(0);
+                if let Some(prev) = ctx
+                    .store
+                    .get_scan_state(source::OPENCLAW, &ctx.instance, &key)
                 {
                     if prev.mtime_ms == mtime && prev.offset == size {
                         continue;
@@ -114,21 +123,21 @@ impl Collector for OpenClawCollector {
                 let mut session_project = None;
                 for line in text.lines() {
                     match parse_entry(line, &ctx.instance, &mut session_project) {
-                        ParseOutcome::Event(e) => report.events.push(e),
+                        ParseOutcome::Event(e) => report.events.push(*e),
                         ParseOutcome::Skip => {}
                         ParseOutcome::Bad => report.skipped += 1,
                     }
                 }
-                let _ = ctx.store.set_scan_state(
-                    source::OPENCLAW,
-                    &ctx.instance,
-                    &key,
-                    &crate::model::ScanState {
+                report.states.push(crate::model::PendingScanState {
+                    source: source::OPENCLAW.to_string(),
+                    instance: ctx.instance.clone(),
+                    key,
+                    state: crate::model::ScanState {
                         offset: size,
                         mtime_ms: mtime,
                         extra: Some("jsonl".into()),
                     },
-                );
+                });
             }
         }
 
@@ -156,7 +165,7 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
 
     let sql = format!(
         "SELECT \"{id_col}\", \"{data_col}\", \"{order_col}\" FROM \"{table}\"
-         WHERE \"{order_col}\" > ?1 ORDER BY \"{order_col}\""
+         WHERE \"{order_col}\" >= ?1 ORDER BY \"{order_col}\""
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![watermark], |r| {
@@ -169,11 +178,12 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
 
     let mut report = ScanReport::default();
     let mut project = None;
-    for row in rows.filter_map(|r| r.ok()) {
-        let (id, data, seq) = row;
+    for row in rows {
+        let (id, data, seq) = row?;
         high_water = high_water.max(seq);
         match parse_entry(&data, &ctx.instance, &mut project) {
-            ParseOutcome::Event(mut e) => {
+            ParseOutcome::Event(e) => {
+                let mut e = *e;
                 if !id.is_empty() {
                     e.dedup_key = id;
                 }
@@ -185,16 +195,16 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
     }
 
     if high_water > watermark {
-        let _ = ctx.store.set_scan_state(
-            source::OPENCLAW,
-            &ctx.instance,
-            &key,
-            &crate::model::ScanState {
+        report.states.push(crate::model::PendingScanState {
+            source: source::OPENCLAW.to_string(),
+            instance: ctx.instance.clone(),
+            key,
+            state: crate::model::ScanState {
                 offset: high_water,
                 mtime_ms: mtime_ms(db_path),
                 extra: None,
             },
-        );
+        });
     }
     Ok(report)
 }
@@ -210,7 +220,13 @@ fn find_transcript_table(conn: &rusqlite::Connection) -> Option<(String, String,
         .filter_map(|r| r.ok())
         .collect();
 
-    for candidate in ["transcript", "entries", "messages", "transcript_entries", "events"] {
+    for candidate in [
+        "transcript",
+        "entries",
+        "messages",
+        "transcript_entries",
+        "events",
+    ] {
         if let Some(t) = tables.iter().find(|t| t.eq_ignore_ascii_case(candidate)) {
             let data = ["data", "json", "payload", "content", "body"]
                 .iter()
@@ -233,7 +249,7 @@ fn find_transcript_table(conn: &rusqlite::Connection) -> Option<(String, String,
 }
 
 enum ParseOutcome {
-    Event(UsageEvent),
+    Event(Box<UsageEvent>),
     Skip,
     Bad,
 }
@@ -306,7 +322,10 @@ fn parse_entry(line: &str, instance: &str, project: &mut Option<String>) -> Pars
         .and_then(|x| x.as_str())
         .unwrap_or("unknown")
         .to_string();
-    e.provider = v.get("provider").and_then(|x| x.as_str()).map(|s| s.to_string());
+    e.provider = v
+        .get("provider")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
     e.session_id = v
         .get("sessionId")
         .or_else(|| v.get("session_id"))
@@ -328,7 +347,7 @@ fn parse_entry(line: &str, instance: &str, project: &mut Option<String>) -> Pars
             &e.total_tokens().to_string(),
         ]);
     }
-    ParseOutcome::Event(e)
+    ParseOutcome::Event(Box::new(e))
 }
 
 fn parse_trajectory(
@@ -370,12 +389,7 @@ fn parse_trajectory(
             .unwrap_or(0)
     };
 
-    let mut e = UsageEvent::new(
-        source::OPENCLAW,
-        surface::CLI,
-        instance,
-        String::new(),
-    );
+    let mut e = UsageEvent::new(source::OPENCLAW, surface::CLI, instance, String::new());
     e.input_tokens = n("input", "inputTokens");
     e.output_tokens = n("output", "outputTokens");
     e.cache_read_tokens = n("cacheRead", "cacheReadTokens");
@@ -429,5 +443,5 @@ fn parse_trajectory(
         ])
     };
 
-    ParseOutcome::Event(e)
+    ParseOutcome::Event(Box::new(e))
 }

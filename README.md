@@ -20,6 +20,8 @@ proxy, intercept, or man-in-the-middle any traffic, and it never sends your data
 
 Remote Hermes and OpenClaw instances can be added over SSH. GlassUsage pulls a consistent
 read-only snapshot of the remote SQLite file; nothing is installed on the remote host.
+The first password-authenticated connection pins the server key locally, and a changed key
+is rejected on later connections.
 
 ## Requirements
 
@@ -68,7 +70,8 @@ local aggregate database. Three details do most of the work:
 
 **Incremental reads.** Every file keeps a watermark of how far it has been parsed, so a
 rescan reads only what is new. Rotation and truncation are detected and reset the
-watermark rather than silently skipping data.
+watermark rather than silently skipping data. Events, affected daily rollups, and the new
+watermark are committed in one SQLite transaction.
 
 **Deduplication.** Every event carries a `dedup_key` derived from stable identifiers in the
 source. Streaming agents rewrite the same message as it grows, so those sources upsert on
@@ -77,7 +80,8 @@ therefore always safe.
 
 **Costs.** A cost reported by the agent itself always wins. Only events that arrive without
 one are priced from the LiteLLM table, and anything with no matching entry is shown as
-`unpriced` rather than counted as zero.
+`unpriced` rather than counted as zero. Cache usage is also left unpriced when the selected
+model entry does not publish explicit cache read/write rates.
 
 Sources that are missing, disabled, or failing to parse say so on the dashboard, so a low
 number is never mistaken for low usage.
@@ -92,7 +96,8 @@ Everything stays in `%APPDATA%\com.glassusage.desktop`:
 - `remote/` — snapshots pulled from remote instances
 
 Credentials (the Cursor session token, SSH passwords) are encrypted with Windows DPAPI and
-are readable only by your Windows account on this machine.
+are readable only by your Windows account on this machine. Password-authenticated SSH
+server keys are pinned separately in `ssh-known-hosts`.
 
 ## The glass
 

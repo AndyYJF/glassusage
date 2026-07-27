@@ -171,10 +171,14 @@ export function RemoteInstances() {
               checked={inst.enabled}
               label={`Enable ${inst.name}`}
               onChange={async (enabled) => {
-                // hasSecret is server-side state; omitting `password` keeps the stored one.
-                const { hasSecret: _hasSecret, ...rest } = inst;
-                await api.upsertRemote({ ...rest, enabled });
-                qc.invalidateQueries({ queryKey: ["remote"] });
+                try {
+                  // hasSecret is server-side state; omitting `password` keeps the stored one.
+                  const { hasSecret: _hasSecret, ...rest } = inst;
+                  await api.upsertRemote({ ...rest, enabled });
+                  qc.invalidateQueries({ queryKey: ["remote"] });
+                } catch (error) {
+                  notify(String(error), "error");
+                }
               }}
             />
             <GlassButton
@@ -182,8 +186,14 @@ export function RemoteInstances() {
               tone="ghost"
               title={t("common.remove")}
               onClick={async () => {
-                await api.deleteRemote(inst.name);
-                qc.invalidateQueries({ queryKey: ["remote"] });
+                if (!window.confirm(t("remote.confirmDelete", { name: inst.name }))) return;
+                try {
+                  await api.deleteRemote(inst.name);
+                  qc.invalidateQueries();
+                  notify(t("remote.removed", { name: inst.name }));
+                } catch (error) {
+                  notify(String(error), "error");
+                }
               }}
             >
               <Trash2 size={12} />

@@ -74,7 +74,12 @@ impl CumulativeTokens {
 
 impl CodexCollector {
     fn home(settings: &AppSettings) -> PathBuf {
-        resolve_root(settings, source::CODEX, Some("CODEX_HOME"), home_dir().join(".codex"))
+        resolve_root(
+            settings,
+            source::CODEX,
+            Some("CODEX_HOME"),
+            home_dir().join(".codex"),
+        )
     }
 
     fn roots(settings: &AppSettings) -> Vec<PathBuf> {
@@ -116,29 +121,35 @@ impl Collector for CodexCollector {
 
         let mut report = ScanReport {
             files_seen: files.len() as i64,
-            detected_paths: roots.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+            detected_paths: roots
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
             ..Default::default()
         };
         for (path, state, events, skipped) in results {
             report.events.extend(events);
             report.skipped += skipped;
-            let _ = ctx.store.set_scan_state(
-                source::CODEX,
-                &ctx.instance,
-                &path.to_string_lossy(),
-                &crate::model::ScanState {
+            report.states.push(crate::model::PendingScanState {
+                source: source::CODEX.to_string(),
+                instance: ctx.instance.clone(),
+                key: path.to_string_lossy().to_string(),
+                state: crate::model::ScanState {
                     offset: state.offset,
                     mtime_ms: mtime_ms(path.as_path()),
                     extra: serde_json::to_string(&state).ok(),
                 },
-            );
+            });
         }
         report.events = finalize(report.events, ctx.pricing);
         Ok(report)
     }
 }
 
-fn parse_file(ctx: &ScanCtx, path: &std::path::Path) -> Option<(PathBuf, CodexState, Vec<UsageEvent>, i64)> {
+fn parse_file(
+    ctx: &ScanCtx,
+    path: &std::path::Path,
+) -> Option<(PathBuf, CodexState, Vec<UsageEvent>, i64)> {
     let key = path.to_string_lossy().to_string();
     let stored = ctx.store.get_scan_state(source::CODEX, &ctx.instance, &key);
 
@@ -176,7 +187,11 @@ fn parse_file(ctx: &ScanCtx, path: &std::path::Path) -> Option<(PathBuf, CodexSt
         match line_type {
             "session_meta" => {
                 if let Some(p) = payload {
-                    if let Some(s) = p.get("session_id").or_else(|| p.get("id")).and_then(|x| x.as_str()) {
+                    if let Some(s) = p
+                        .get("session_id")
+                        .or_else(|| p.get("id"))
+                        .and_then(|x| x.as_str())
+                    {
                         state.session_id = s.to_string();
                     }
                     if let Some(s) = p.get("model_provider").and_then(|x| x.as_str()) {
@@ -189,12 +204,18 @@ fn parse_file(ctx: &ScanCtx, path: &std::path::Path) -> Option<(PathBuf, CodexSt
             }
             // The model can change mid-session; both of these announce the new one.
             "turn_context" => {
-                if let Some(m) = payload.and_then(|p| p.get("model")).and_then(|x| x.as_str()) {
+                if let Some(m) = payload
+                    .and_then(|p| p.get("model"))
+                    .and_then(|x| x.as_str())
+                {
                     state.model = m.to_string();
                 }
             }
             "event_msg" => {
-                let ptype = payload.and_then(|p| p.get("type")).and_then(|x| x.as_str()).unwrap_or("");
+                let ptype = payload
+                    .and_then(|p| p.get("type"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
                 match ptype {
                     "thread_settings_applied" => {
                         if let Some(ts) = payload.and_then(|p| p.get("thread_settings")) {

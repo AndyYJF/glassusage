@@ -7,8 +7,10 @@
 //! Password authentication cannot use an interactive TTY (the app has none). That path
 //! uses the pure-Rust `russh` client in [`super::password_ssh`] so PuTTY is not required.
 
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
@@ -20,19 +22,26 @@ use super::RemoteInstance;
 /// Commands are given a hard ceiling so a hung network never blocks a scheduler thread.
 const CONNECT_TIMEOUT_SECS: u32 = 10;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct SshClient {
     instance: RemoteInstance,
     password: Option<String>,
+    known_hosts_path: PathBuf,
     /// Reused for the whole sync so password mode does not re-authenticate per call.
     password_session: Mutex<Option<PasswordSession>>,
 }
 
 impl SshClient {
-    pub fn new(instance: RemoteInstance, password: Option<String>) -> Self {
+    pub fn new(
+        instance: RemoteInstance,
+        password: Option<String>,
+        known_hosts_path: PathBuf,
+    ) -> Self {
         Self {
             instance,
             password,
+            known_hosts_path,
             password_session: Mutex::new(None),
         }
     }
@@ -45,7 +54,10 @@ impl SshClient {
         format!("{}@{}", self.instance.username, self.instance.host)
     }
 
-    fn with_password_session<R>(&self, f: impl FnOnce(&mut PasswordSession) -> Result<R>) -> Result<R> {
+    fn with_password_session<R>(
+        &self,
+        f: impl FnOnce(&mut PasswordSession) -> Result<R>,
+    ) -> Result<R> {
         let password = password_ssh::require_password(&self.password)?;
         let mut guard = self.password_session.lock();
         if guard.is_none() {
@@ -60,6 +72,7 @@ impl SshClient {
                 self.instance.port as u16,
                 &self.instance.username,
                 password,
+                &self.known_hosts_path,
             )?);
         }
         f(guard.as_mut().unwrap())
@@ -81,7 +94,12 @@ impl SshClient {
             self.instance.port.to_string(),
         ];
         if self.instance.auth_mode == "key" {
-            if let Some(key) = self.instance.key_path.as_ref().filter(|k| !k.trim().is_empty()) {
+            if let Some(key) = self
+                .instance
+                .key_path
+                .as_ref()
+                .filter(|k| !k.trim().is_empty())
+            {
                 args.push("-i".into());
                 args.push(key.clone());
                 // Do not fall back to agent keys when an explicit key was chosen.
@@ -123,7 +141,7 @@ impl SshClient {
         if let Some(dir) = local_path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        let remote_spec = format!("{}:{}", self.target(), shell_quote_scp(remote_path));
+        let remote_spec = format!("{}:{}", self.target(), shell_quote(remote_path));
 
         let mut args = vec![
             "-o".to_string(),
@@ -136,7 +154,12 @@ impl SshClient {
             self.instance.port.to_string(),
         ];
         if self.instance.auth_mode == "key" {
-            if let Some(key) = self.instance.key_path.as_ref().filter(|k| !k.trim().is_empty()) {
+            if let Some(key) = self
+                .instance
+                .key_path
+                .as_ref()
+                .filter(|k| !k.trim().is_empty())
+            {
                 args.push("-i".into());
                 args.push(key.clone());
             }
@@ -189,7 +212,10 @@ impl SshClient {
     }
 
     pub fn list_dir(&self, remote_path: &str) -> Result<Vec<String>> {
-        let out = self.exec(&format!("ls -1 {} 2>/dev/null || true", shell_quote(remote_path)))?;
+        let out = self.exec(&format!(
+            "ls -1 {} 2>/dev/null || true",
+            shell_quote(remote_path)
+        ))?;
         Ok(out
             .lines()
             .map(|l| l.trim().to_string())
@@ -204,9 +230,15 @@ impl SshClient {
     /// together and rusqlite replays the log locally; those three transfers are not
     /// atomic, so a torn read is possible and the caller discards the snapshot when it
     /// fails to open, picking it up on the next poll.
-    pub fn snapshot_sqlite(&self, remote_db: &str, local_db: &Path, use_backup: bool) -> Result<()> {
+    pub fn snapshot_sqlite(
+        &self,
+        remote_db: &str,
+        local_db: &Path,
+        use_backup: bool,
+    ) -> Result<()> {
         if use_backup {
-            let tmp = format!("/tmp/glassusage-snap-{}.db", std::process::id());
+            let sequence = SNAPSHOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let tmp = format!("/tmp/glassusage-snap-{}-{sequence}.db", std::process::id());
             let cmd = format!(
                 "rm -f {tmp} && sqlite3 {src} \".backup '{tmp}'\"",
                 tmp = tmp,
@@ -233,10 +265,11 @@ impl SshClient {
                 local_db.file_name().unwrap_or_default().to_string_lossy()
             ));
             // Sidecars are optional; a database checkpointed at rest has none.
-            if matches!(self.stat(&remote_side), Ok(Some(_))) {
-                let _ = self.download(&remote_side, &local_side);
-            } else {
-                std::fs::remove_file(&local_side).ok();
+            match self.stat(&remote_side)? {
+                Some(_) => self.download(&remote_side, &local_side)?,
+                None => {
+                    std::fs::remove_file(&local_side).ok();
+                }
             }
         }
         Ok(())
@@ -258,26 +291,68 @@ fn run(program: &str, args: &[String]) -> Result<std::process::Output> {
         child.creation_flags(0x0800_0000);
     }
 
-    let mut handle = child.spawn().map_err(|e| anyhow!("failed to start {program}: {e}"))?;
+    let mut handle = child
+        .spawn()
+        .map_err(|e| anyhow!("failed to start {program}: {e}"))?;
+    let stdout = handle
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture {program} stdout"))?;
+    let stderr = handle
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("failed to capture {program} stderr"))?;
+    // Drain both pipes while the child runs. Polling a child with full pipes can
+    // otherwise deadlock before the timeout logic gets a chance to kill it.
+    let stdout_reader = std::thread::spawn(move || {
+        let mut reader = stdout;
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut reader = stderr;
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).map(|_| bytes)
+    });
 
-    // `Child::wait_with_output` has no timeout, so poll and kill on overrun.
+    // Waiting directly has no timeout, so poll and kill on overrun.
     let deadline = std::time::Instant::now() + COMMAND_TIMEOUT;
-    loop {
-        if let Some(_status) = handle.try_wait()? {
-            return Ok(handle.wait_with_output()?);
+    let status = loop {
+        if let Some(status) = handle.try_wait()? {
+            break status;
         }
         if std::time::Instant::now() > deadline {
             let _ = handle.kill();
-            bail!("remote command timed out after {}s", COMMAND_TIMEOUT.as_secs());
+            let _ = handle.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            bail!(
+                "remote command timed out after {}s",
+                COMMAND_TIMEOUT.as_secs()
+            );
         }
         std::thread::sleep(Duration::from_millis(80));
-    }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| anyhow!("{program} stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| anyhow!("{program} stderr reader panicked"))??;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn locate(exe: &str) -> Result<String> {
     // Prefer the copy in System32 so a shadowed `ssh` on PATH cannot be picked up.
     if let Some(sysroot) = std::env::var_os("SystemRoot") {
-        let p = Path::new(&sysroot).join("System32").join("OpenSSH").join(exe);
+        let p = Path::new(&sysroot)
+            .join("System32")
+            .join("OpenSSH")
+            .join(exe);
         if p.is_file() {
             return Ok(p.to_string_lossy().to_string());
         }
@@ -301,8 +376,16 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// scp parses the remote path with a shell on the far side, but the local argument must
-/// not be quoted, so only the characters that would break parsing are escaped.
-fn shell_quote_scp(s: &str) -> String {
-    s.replace(' ', "\\ ")
+#[cfg(test)]
+mod tests {
+    use super::shell_quote;
+
+    #[test]
+    fn remote_paths_are_single_quoted_for_the_remote_shell() {
+        assert_eq!(
+            shell_quote("/tmp/a; touch /tmp/not-allowed"),
+            "'/tmp/a; touch /tmp/not-allowed'"
+        );
+        assert_eq!(shell_quote("/tmp/it's.db"), r"'/tmp/it'\''s.db'");
+    }
 }

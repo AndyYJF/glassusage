@@ -297,6 +297,8 @@ const en = {
   "remote.archivesHint": "Extra rotated JSONL under agents/*/archives (sessions are always synced).",
   "remote.enabled": "Enabled",
   "remote.saved": "Saved {name}",
+  "remote.confirmDelete": "Delete {name} and all imported usage records? This cannot be undone.",
+  "remote.removed": "Removed {name}",
   "remote.synced": "{name}: imported {n} events",
   "remote.test": "Test connection",
 
@@ -344,6 +346,8 @@ const en = {
 } as const;
 
 const zh: Record<MessageKey, string> = {
+  "remote.confirmDelete": "删除 {name} 及其所有已导入的用量记录？此操作无法撤销。",
+  "remote.removed": "已删除 {name}",
   "nav.dashboard": "仪表盘",
   "nav.usage": "用量",
   "nav.compare": "对比",

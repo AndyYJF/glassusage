@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -21,14 +21,33 @@ use crate::state::AppState;
 const DEBOUNCE: Duration = Duration::from_millis(800);
 
 pub struct WatchHandle {
-    _watcher: Option<RecommendedWatcher>,
+    _manager: std::thread::JoinHandle<()>,
 }
 
 pub fn start(app: AppHandle, state: Arc<AppState>) -> WatchHandle {
     let dirty = Arc::new(Mutex::new(HashSet::<String>::new()));
     let pending = Arc::new(AtomicBool::new(false));
 
-    let watcher = build_watcher(&state, dirty.clone(), pending.clone());
+    let (reconfigure_tx, reconfigure_rx) = std::sync::mpsc::channel();
+    let _ = RECONFIGURE.set(reconfigure_tx);
+    let manager_state = state.clone();
+    let manager_dirty = dirty.clone();
+    let manager_pending = pending.clone();
+    let manager = std::thread::spawn(move || {
+        let mut watcher = build_watcher(
+            &manager_state,
+            manager_dirty.clone(),
+            manager_pending.clone(),
+        );
+        while reconfigure_rx.recv().is_ok() {
+            watcher = build_watcher(
+                &manager_state,
+                manager_dirty.clone(),
+                manager_pending.clone(),
+            );
+        }
+        drop(watcher);
+    });
 
     spawn_debounce_loop(app.clone(), state.clone(), dirty, pending);
     spawn_fallback_timer(app.clone(), state.clone());
@@ -36,7 +55,15 @@ pub fn start(app: AppHandle, state: Arc<AppState>) -> WatchHandle {
     spawn_live_ticker(app.clone(), state.clone());
     crate::remote::spawn_scheduler(app, state);
 
-    WatchHandle { _watcher: watcher }
+    WatchHandle { _manager: manager }
+}
+
+static RECONFIGURE: OnceLock<std::sync::mpsc::Sender<()>> = OnceLock::new();
+
+pub fn request_reconfigure() {
+    if let Some(sender) = RECONFIGURE.get() {
+        let _ = sender.send(());
+    }
 }
 
 fn build_watcher(
@@ -65,7 +92,9 @@ fn build_watcher(
         let Ok(event) = res else { return };
         if !matches!(
             event.kind,
-            notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Remove(_)
+            notify::EventKind::Create(_)
+                | notify::EventKind::Modify(_)
+                | notify::EventKind::Remove(_)
         ) {
             return;
         }

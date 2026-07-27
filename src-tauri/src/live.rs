@@ -62,10 +62,7 @@ impl LiveTracker {
                 continue;
             }
             // Backfilled events can arrive out of order, so keep the newest timestamp.
-            let seen = inner
-                .last_seen
-                .entry(d.source.clone())
-                .or_insert(d.ts_ms);
+            let seen = inner.last_seen.entry(d.source.clone()).or_insert(d.ts_ms);
             *seen = (*seen).max(d.ts_ms);
             inner.events.push_back(Entry {
                 ts_ms: d.ts_ms,
@@ -76,7 +73,12 @@ impl LiveTracker {
         }
         // Keep the deque from growing without bound during a large backfill.
         let cutoff = now_ms() - WINDOW_MS;
-        while inner.events.len() > 20_000 || inner.events.front().is_some_and(|e| e.ts_ms < cutoff - WINDOW_MS) {
+        while inner.events.len() > 20_000
+            || inner
+                .events
+                .front()
+                .is_some_and(|e| e.ts_ms < cutoff - WINDOW_MS)
+        {
             if inner.events.pop_front().is_none() {
                 break;
             }
@@ -128,10 +130,16 @@ impl LiveTracker {
         inner.smoothed_tpm = ema(inner.smoothed_tpm, tokens);
 
         let mut per_source = Vec::new();
-        let known: Vec<String> = crate::model::source::ALL.iter().map(|s| s.to_string()).collect();
+        let known: Vec<String> = crate::model::source::ALL
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         for source in known {
             let raw = per_source_raw.get(&source).copied().unwrap_or((0.0, 0.0));
-            let entry = inner.smoothed_per_source.entry(source.clone()).or_insert((0.0, 0.0));
+            let entry = inner
+                .smoothed_per_source
+                .entry(source.clone())
+                .or_insert((0.0, 0.0));
             entry.0 = ema(entry.0, raw.0);
             entry.1 = ema(entry.1, raw.1);
             let (rpm, tpm) = *entry;

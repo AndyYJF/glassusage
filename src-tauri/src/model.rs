@@ -13,7 +13,15 @@ pub mod source {
     pub const HERMES: &str = "hermes";
     pub const OPENCLAW: &str = "openclaw";
 
-    pub const ALL: &[&str] = &[CLAUDE, CODEX, CURSOR, ANTIGRAVITY, OPENCODE, HERMES, OPENCLAW];
+    pub const ALL: &[&str] = &[
+        CLAUDE,
+        CODEX,
+        CURSOR,
+        ANTIGRAVITY,
+        OPENCODE,
+        HERMES,
+        OPENCLAW,
+    ];
 }
 
 /// Which shape of the product produced the event. Purely a label: the same underlying
@@ -91,6 +99,17 @@ pub struct ScanState {
     pub offset: i64,
     pub mtime_ms: i64,
     pub extra: Option<String>,
+}
+
+/// A watermark that must advance only after the events discovered by the same scan have
+/// been persisted. Keeping this alongside [`UsageEvent`] lets the store commit both in one
+/// SQLite transaction, so a disk/full/schema error cannot make a later scan skip data.
+#[derive(Debug, Clone)]
+pub struct PendingScanState {
+    pub source: String,
+    pub instance: String,
+    pub key: String,
+    pub state: ScanState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

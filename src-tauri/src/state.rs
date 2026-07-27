@@ -9,7 +9,9 @@ use tauri::{AppHandle, Emitter};
 
 use crate::collectors::{self, Collector, ScanCtx};
 use crate::live::LiveTracker;
-use crate::model::{source, HealthStatus, LiveRates, SourceHealth, LOCAL_INSTANCE};
+use crate::model::{
+    source, HealthStatus, LiveRates, PendingScanState, ScanState, SourceHealth, LOCAL_INSTANCE,
+};
 use crate::pricing::Pricing;
 use crate::settings::SettingsStore;
 use crate::store::Store;
@@ -95,6 +97,16 @@ impl AppState {
     /// Errors are recorded against the source and surfaced through `source-status`;
     /// they never propagate far enough to interrupt other collectors.
     pub fn run_scan(&self, app: &AppHandle, source_id: &str, root_override: Option<PathBuf>) {
+        self.run_scan_with_states(app, source_id, root_override, Vec::new());
+    }
+
+    fn run_scan_with_states(
+        &self,
+        app: &AppHandle,
+        source_id: &str,
+        root_override: Option<PathBuf>,
+        mut pending_states: Vec<PendingScanState>,
+    ) {
         let Some(collector) = collectors::collector_by_id(source_id) else {
             return;
         };
@@ -114,11 +126,37 @@ impl AppState {
         };
 
         match collector.scan(&ctx) {
-            Ok(report) => {
-                let outcome = self
-                    .store
-                    .insert_events(&report.events, collector.write_mode())
-                    .unwrap_or_default();
+            Ok(mut report) => {
+                pending_states.append(&mut report.states);
+                let outcome = match self.store.ingest_scan(
+                    &report.events,
+                    collector.write_mode(),
+                    &pending_states,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let msg = format!("persist scan result: {error}");
+                        tracing::warn!("scan {source_id} failed: {msg}");
+                        let _ = self.store.record_status(
+                            source_id,
+                            &instance,
+                            report.files_seen,
+                            report.skipped,
+                            &report.detected_paths,
+                            Some(&msg),
+                        );
+                        let _ = app.emit(
+                            "source-status",
+                            SourceStatusEvent {
+                                source: source_id.to_string(),
+                                instance,
+                                status: HealthStatus::Error,
+                                error: Some(msg),
+                            },
+                        );
+                        return;
+                    }
+                };
 
                 self.live.push(&outcome.deltas);
                 let _ = self.store.record_status(
@@ -210,7 +248,9 @@ impl AppState {
         // Resume from the stored watermark, with a small overlap so an event that landed
         // during the previous request is not missed. Duplicates are filtered by dedup key.
         let key = "api:usage-events";
-        let state = self.store.get_scan_state(source::CURSOR, LOCAL_INSTANCE, key);
+        let state = self
+            .store
+            .get_scan_state(source::CURSOR, LOCAL_INSTANCE, key);
         let now = chrono::Utc::now().timestamp_millis();
         let start = state
             .as_ref()
@@ -223,26 +263,26 @@ impl AppState {
                 cursor_api::set_error(None);
                 let count = events.len();
                 cursor_api::stash_events(events);
-                let _ = self.store.set_scan_state(
-                    source::CURSOR,
-                    LOCAL_INSTANCE,
-                    key,
-                    &crate::model::ScanState {
+                let pending = PendingScanState {
+                    source: source::CURSOR.to_string(),
+                    instance: LOCAL_INSTANCE.to_string(),
+                    key: key.to_string(),
+                    state: ScanState {
                         offset: now,
                         mtime_ms: now,
                         extra: Some(count.to_string()),
                     },
-                );
-                self.run_scan(app, source::CURSOR, None);
+                };
+                self.run_scan_with_states(app, source::CURSOR, None, vec![pending]);
             }
             Err(e) => {
                 // The dashboard API is private and can change without notice; the tile
                 // shows a degraded state rather than the app treating this as fatal.
                 let msg = format!("Cursor account API unavailable: {e}");
                 cursor_api::set_error(Some(msg.clone()));
-                let _ = self
-                    .store
-                    .record_status(source::CURSOR, LOCAL_INSTANCE, 0, 0, &[], Some(&msg));
+                let _ =
+                    self.store
+                        .record_status(source::CURSOR, LOCAL_INSTANCE, 0, 0, &[], Some(&msg));
                 let _ = app.emit(
                     "source-status",
                     SourceStatusEvent {
@@ -384,7 +424,10 @@ impl AppState {
             });
 
             if health.detected_paths.is_empty() {
-                health.detected_paths = detected.iter().map(|p| p.to_string_lossy().to_string()).collect();
+                health.detected_paths = detected
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
             }
             health.status = if !settings.source_enabled(id) {
                 HealthStatus::Disabled
@@ -401,17 +444,22 @@ impl AppState {
         }
 
         // Remote instances keep their stored rows; derive status from the last sync.
-        out.extend(stored.into_iter().filter(|h| h.instance != LOCAL_INSTANCE).map(|mut h| {
-            h.status = if h.last_error.is_some() {
-                HealthStatus::Error
-            } else if h.detected_paths.is_empty() && h.event_count == 0 {
-                HealthStatus::Missing
-            } else {
-                // SSH pulls are always on a timer, even for agents that are realtime locally.
-                HealthStatus::Polling
-            };
-            h
-        }));
+        out.extend(
+            stored
+                .into_iter()
+                .filter(|h| h.instance != LOCAL_INSTANCE)
+                .map(|mut h| {
+                    h.status = if h.last_error.is_some() {
+                        HealthStatus::Error
+                    } else if h.detected_paths.is_empty() && h.event_count == 0 {
+                        HealthStatus::Missing
+                    } else {
+                        // SSH pulls are always on a timer, even for agents that are realtime locally.
+                        HealthStatus::Polling
+                    };
+                    h
+                }),
+        );
         out
     }
 

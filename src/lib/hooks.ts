@@ -27,8 +27,8 @@ import type {
   UsageUpdatedEvent,
 } from "./types";
 
-/** Align both ends to the minute so rolling windows (e.g. 1d) keep a stable query key. */
-function stabilize(from: number, to: number) {
+/** Align cache keys to the minute without changing the range sent to SQLite. */
+function stabilizeKey(from: number, to: number) {
   const minute = 60_000;
   const f = Math.floor(from / minute) * minute;
   const t = Math.floor(to / minute) * minute;
@@ -43,41 +43,55 @@ export function useRange() {
 
   if (range === "custom") {
     const to = endFollowsNow ? Date.now() : customTo;
-    return { key: range as RangeKey, ...stabilize(customFrom, Math.max(customFrom, to)) };
+    const actual = { from: customFrom, to: Math.max(customFrom, to) };
+    const stable = stabilizeKey(actual.from, actual.to);
+    return {
+      key: range as RangeKey,
+      ...actual,
+      cacheFrom: stable.from,
+      cacheTo: stable.to,
+    };
   }
   const resolved = resolveRange(range);
-  return { key: range as RangeKey, ...stabilize(resolved.from, resolved.to) };
+  const stable = stabilizeKey(resolved.from, resolved.to);
+  return {
+    key: range as RangeKey,
+    ...resolved,
+    cacheFrom: stable.from,
+    cacheTo: stable.to,
+  };
 }
 
 export function useOverview() {
-  const { key, from, to } = useRange();
+  const { key, from, to, cacheFrom, cacheTo } = useRange();
   return useQuery<OverviewStats>({
-    queryKey: ["overview", key, from, to],
+    queryKey: ["overview", key, cacheFrom, cacheTo],
     queryFn: () => api.overview({ from, to }),
   });
 }
 
 export function useTimeseries(groupBy: GroupBy = "source", bucket?: Bucket, source?: string) {
-  const { key, from, to } = useRange();
+  const { key, from, to, cacheFrom, cacheTo } = useRange();
   const b = bucket ?? bucketFor(key, from, to);
   return useQuery<SeriesPoint[]>({
-    queryKey: ["timeseries", key, from, to, groupBy, b, source ?? "all"],
+    queryKey: ["timeseries", key, cacheFrom, cacheTo, groupBy, b, source ?? "all"],
     queryFn: () => api.timeseries({ from, to }, groupBy, b, source),
   });
 }
 
 export function useAgentStats(source: string) {
-  const { key, from, to } = useRange();
+  const { key, from, to, cacheFrom, cacheTo } = useRange();
   return useQuery<AgentStats>({
-    queryKey: ["agent", source, key, from, to],
+    queryKey: ["agent", source, key, cacheFrom, cacheTo],
     queryFn: () => api.agentStats(source, { from, to }),
     enabled: Boolean(source),
   });
 }
 
 export function useUsageLog(filter: UsageFilter, page: number, pageSize: number) {
+  const keyFilter = stableFilterKey(filter);
   return useQuery({
-    queryKey: ["usage-log", filter, page, pageSize],
+    queryKey: ["usage-log", keyFilter, page, pageSize],
     queryFn: () => api.usageLog(filter, page, pageSize),
     placeholderData: (prev) => prev,
   });
@@ -88,11 +102,18 @@ export function useGroupStats(
   filter: UsageFilter,
   opts?: { enabled?: boolean },
 ) {
+  const keyFilter = stableFilterKey(filter);
   return useQuery({
-    queryKey: ["group", column, filter],
+    queryKey: ["group", column, keyFilter],
     queryFn: () => api.groupStats(column, filter),
     enabled: opts?.enabled ?? true,
   });
+}
+
+function stableFilterKey(filter: UsageFilter): UsageFilter {
+  if (filter.from === undefined || filter.to === undefined) return filter;
+  const stable = stabilizeKey(filter.from, filter.to);
+  return { ...filter, from: stable.from, to: stable.to };
 }
 
 export function useSourceHealth() {

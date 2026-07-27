@@ -8,7 +8,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const dir = path.join(os.homedir(), "AppData", "Roaming", "com.glassusage.app");
+const roaming = path.join(os.homedir(), "AppData", "Roaming");
+const currentDir = path.join(roaming, "com.glassusage.desktop");
+const legacyDir = path.join(roaming, "com.glassusage.app");
+const dir = fs.existsSync(path.join(currentDir, "usage.db")) ? currentDir : legacyDir;
 const needle = (process.argv[2] ?? "kimi").toLowerCase();
 
 const db = new DatabaseSync(path.join(dir, "usage.db"), { readOnly: true });

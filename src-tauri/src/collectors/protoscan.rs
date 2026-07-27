@@ -24,11 +24,17 @@ pub struct Message {
 
 impl Message {
     pub fn get(&self, field: u32) -> Option<&Value> {
-        self.fields.iter().find(|(n, _)| *n == field).map(|(_, v)| v)
+        self.fields
+            .iter()
+            .find(|(n, _)| *n == field)
+            .map(|(_, v)| v)
     }
 
     pub fn get_all(&self, field: u32) -> impl Iterator<Item = &Value> {
-        self.fields.iter().filter(move |(n, _)| *n == field).map(|(_, v)| v)
+        self.fields
+            .iter()
+            .filter(move |(n, _)| *n == field)
+            .map(|(_, v)| v)
     }
 
     pub fn message(&self, field: u32) -> Option<&Message> {
@@ -51,7 +57,10 @@ impl Message {
         match self.get(field) {
             Some(Value::Bytes(b)) => String::from_utf8(b.clone()).ok(),
             // A submessage whose bytes happened to parse as one still has the raw text.
-            Some(Value::Message(m)) => m.raw.as_ref().and_then(|b| String::from_utf8(b.clone()).ok()),
+            Some(Value::Message(m)) => m
+                .raw
+                .as_ref()
+                .and_then(|b| String::from_utf8(b.clone()).ok()),
             _ => None,
         }
     }

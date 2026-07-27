@@ -41,7 +41,9 @@ impl OpenCodeCollector {
     fn databases(settings: &AppSettings) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for dir in Self::data_dirs(settings) {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for e in entries.filter_map(|e| e.ok()) {
                 let name = e.file_name().to_string_lossy().to_string();
                 if name.starts_with("opencode") && name.ends_with(".db") {
@@ -62,6 +64,10 @@ impl Collector for OpenCodeCollector {
         "OpenCode"
     }
 
+    fn write_mode(&self) -> WriteMode {
+        WriteMode::Upsert
+    }
+
     fn detect(&self, settings: &AppSettings) -> Vec<PathBuf> {
         Self::databases(settings)
     }
@@ -77,7 +83,10 @@ impl Collector for OpenCodeCollector {
         };
         let mut report = ScanReport {
             files_seen: dbs.len() as i64,
-            detected_paths: dbs.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+            detected_paths: dbs
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
             ..Default::default()
         };
 
@@ -123,16 +132,15 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
         // `session` supplies the project directory that message rows omit.
         let mut dirs = std::collections::HashMap::<String, String>::new();
         if table_exists(&conn, "session") {
-            if let Ok(mut stmt) = conn.prepare("SELECT id, directory FROM session") {
-                if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
-                    dirs = rows.filter_map(|r| r.ok()).collect();
-                }
-            }
+            let mut stmt = conn.prepare("SELECT id, directory FROM session")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            dirs = rows.collect::<rusqlite::Result<_>>()?;
         }
 
         let mut stmt = conn.prepare(
             "SELECT id, session_id, time_created, time_updated, data
-             FROM message WHERE time_updated > ?1 ORDER BY time_updated",
+             FROM message WHERE time_updated >= ?1 ORDER BY time_updated",
         )?;
         let rows = stmt.query_map(params![watermark], |r| {
             Ok((
@@ -144,8 +152,8 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
             ))
         })?;
 
-        for row in rows.filter_map(|r| r.ok()) {
-            let (id, session_id, created, updated, data) = row;
+        for row in rows {
+            let (id, session_id, created, updated, data) = row?;
             high_water = high_water.max(updated);
 
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) else {
@@ -155,7 +163,9 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
             if v.get("role").and_then(|x| x.as_str()) != Some("assistant") {
                 continue;
             }
-            let Some(tokens) = v.get("tokens") else { continue };
+            let Some(tokens) = v.get("tokens") else {
+                continue;
+            };
             let n = |path: &[&str]| -> i64 {
                 let mut cur = tokens;
                 for p in path {
@@ -213,7 +223,7 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
         let mut stmt = conn.prepare(
             "SELECT id, directory, model, cost, tokens_input, tokens_output, tokens_reasoning,
                     tokens_cache_read, tokens_cache_write, time_created, time_updated
-             FROM session WHERE time_updated > ?1",
+             FROM session WHERE time_updated >= ?1",
         )?;
         let rows = stmt.query_map(params![watermark], |r| {
             Ok((
@@ -230,10 +240,15 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
                 r.get::<_, i64>(10)?,
             ))
         })?;
-        for row in rows.filter_map(|r| r.ok()) {
-            let (id, dir, model, cost, ti, to, tr, tcr, tcw, created, updated) = row;
+        for row in rows {
+            let (id, dir, model, cost, ti, to, tr, tcr, tcw, created, updated) = row?;
             high_water = high_water.max(updated);
-            let mut e = UsageEvent::new(source::OPENCODE, surface::CLI, &ctx.instance, format!("session:{id}"));
+            let mut e = UsageEvent::new(
+                source::OPENCODE,
+                surface::CLI,
+                &ctx.instance,
+                format!("session:{id}"),
+            );
             e.session_id = id;
             e.project = dir.as_deref().and_then(project_label);
             e.model = model.unwrap_or_else(|| "unknown".into());
@@ -246,19 +261,21 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
             e.timestamp = created;
             report.events.push(e);
         }
+    } else {
+        anyhow::bail!("unsupported OpenCode schema: missing message and session tables");
     }
 
     if high_water > watermark {
-        let _ = ctx.store.set_scan_state(
-            source::OPENCODE,
-            &ctx.instance,
-            &key,
-            &crate::model::ScanState {
+        report.states.push(crate::model::PendingScanState {
+            source: source::OPENCODE.to_string(),
+            instance: ctx.instance.clone(),
+            key,
+            state: crate::model::ScanState {
                 offset: high_water,
                 mtime_ms: mtime_ms(db_path),
                 extra: None,
             },
-        );
+        });
     }
     Ok(report)
 }
@@ -266,12 +283,18 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
 /// Pre-v2 layout: one JSON file per message under `storage/message/<sessionID>/`.
 fn scan_legacy(ctx: &ScanCtx, dir: &std::path::Path) -> Result<ScanReport> {
     let key = format!("legacy:{}", dir.to_string_lossy());
-    if ctx.store.get_scan_state(source::OPENCODE, &ctx.instance, &key).is_some() {
+    if ctx
+        .store
+        .get_scan_state(source::OPENCODE, &ctx.instance, &key)
+        .is_some()
+    {
         return Ok(ScanReport::default());
     }
     let mut report = ScanReport::default();
     for file in find_files(dir, |p| has_ext(p, "json")) {
-        let Ok(text) = std::fs::read_to_string(&file) else { continue };
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
             report.skipped += 1;
             continue;
@@ -279,7 +302,9 @@ fn scan_legacy(ctx: &ScanCtx, dir: &std::path::Path) -> Result<ScanReport> {
         if v.get("role").and_then(|x| x.as_str()) != Some("assistant") {
             continue;
         }
-        let Some(tokens) = v.get("tokens") else { continue };
+        let Some(tokens) = v.get("tokens") else {
+            continue;
+        };
         let n = |path: &[&str]| -> i64 {
             let mut cur = tokens;
             for p in path {
@@ -314,7 +339,10 @@ fn scan_legacy(ctx: &ScanCtx, dir: &std::path::Path) -> Result<ScanReport> {
             .and_then(|x| x.as_str())
             .unwrap_or("unknown")
             .to_string();
-        e.provider = v.get("providerID").and_then(|x| x.as_str()).map(|s| s.to_string());
+        e.provider = v
+            .get("providerID")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
         e.timestamp = v
             .get("time")
             .and_then(|t| t.get("created"))
@@ -322,15 +350,15 @@ fn scan_legacy(ctx: &ScanCtx, dir: &std::path::Path) -> Result<ScanReport> {
             .unwrap_or_else(crate::store::now_ms);
         report.events.push(e);
     }
-    let _ = ctx.store.set_scan_state(
-        source::OPENCODE,
-        &ctx.instance,
-        &key,
-        &crate::model::ScanState {
+    report.states.push(crate::model::PendingScanState {
+        source: source::OPENCODE.to_string(),
+        instance: ctx.instance.clone(),
+        key,
+        state: crate::model::ScanState {
             offset: 1,
             mtime_ms: crate::store::now_ms(),
             extra: Some("imported".into()),
         },
-    );
+    });
     Ok(report)
 }

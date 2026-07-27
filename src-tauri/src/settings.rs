@@ -146,8 +146,7 @@ impl SettingsStore {
                 let raw: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
                 // Settings that predate onboarding must not re-open the wizard.
                 let had_flag = raw.get("firstRunDone").is_some();
-                let mut settings: AppSettings =
-                    serde_json::from_value(raw).unwrap_or_default();
+                let mut settings: AppSettings = serde_json::from_value(raw).unwrap_or_default();
                 if !had_flag {
                     settings.first_run_done = true;
                 }
@@ -167,19 +166,24 @@ impl SettingsStore {
 
     /// Merge a partial JSON patch into the current settings and persist.
     pub fn patch(&self, patch: serde_json::Value) -> Result<AppSettings> {
-        let mut current = serde_json::to_value(self.inner.read().clone())?;
+        let mut guard = self.inner.write();
+        let mut current = serde_json::to_value(&*guard)?;
         merge(&mut current, patch);
         let next: AppSettings = serde_json::from_value(current)?;
-        *self.inner.write() = next.clone();
-        self.save()?;
+        self.save_value(&next)?;
+        *guard = next.clone();
         Ok(next)
     }
 
     pub fn save(&self) -> Result<()> {
+        self.save_value(&self.inner.read())
+    }
+
+    fn save_value(&self, settings: &AppSettings) -> Result<()> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        std::fs::write(&self.path, serde_json::to_string_pretty(&*self.inner.read())?)?;
+        std::fs::write(&self.path, serde_json::to_string_pretty(settings)?)?;
         Ok(())
     }
 }

@@ -76,7 +76,10 @@ impl Collector for HermesCollector {
     }
 
     fn watch_paths(&self, settings: &AppSettings) -> Vec<PathBuf> {
-        Self::homes(settings).into_iter().filter(|p| p.is_dir()).collect()
+        Self::homes(settings)
+            .into_iter()
+            .filter(|p| p.is_dir())
+            .collect()
     }
 
     /// Session rows keep growing while a session is live, so the latest read wins.
@@ -99,7 +102,10 @@ impl Collector for HermesCollector {
 
         let mut report = ScanReport {
             files_seen: dbs.len() as i64,
-            detected_paths: dbs.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+            detected_paths: dbs
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
             ..Default::default()
         };
         for db in &dbs {
@@ -119,13 +125,19 @@ impl Collector for HermesCollector {
 fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
     let conn = open_sqlite_ro(db_path)?;
     if !table_exists(&conn, "sessions") {
-        return Ok(ScanReport::default());
+        anyhow::bail!("unsupported Hermes schema: missing sessions table");
     }
 
     // Column names have shifted across Hermes versions; probe rather than assume so a
     // rename degrades one field instead of the whole source.
     let has = |c: &str| column_exists(&conn, "sessions", c);
-    let col = |c: &str, fallback: &str| if has(c) { c.to_string() } else { fallback.to_string() };
+    let col = |c: &str, fallback: &str| {
+        if has(c) {
+            c.to_string()
+        } else {
+            fallback.to_string()
+        }
+    };
 
     let sql = format!(
         "SELECT id,
@@ -140,9 +152,21 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
         cread = col("cache_read_tokens", "0"),
         cwrite = col("cache_write_tokens", "0"),
         reasoning = col("reasoning_tokens", "0"),
-        actual = if has("actual_cost_usd") { "actual_cost_usd" } else { "NULL" },
-        estimated = if has("estimated_cost_usd") { "estimated_cost_usd" } else { "NULL" },
-        provider = if has("billing_provider") { "billing_provider" } else { "NULL" },
+        actual = if has("actual_cost_usd") {
+            "actual_cost_usd"
+        } else {
+            "NULL"
+        },
+        estimated = if has("estimated_cost_usd") {
+            "estimated_cost_usd"
+        } else {
+            "NULL"
+        },
+        provider = if has("billing_provider") {
+            "billing_provider"
+        } else {
+            "NULL"
+        },
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -164,8 +188,21 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
     })?;
 
     let mut report = ScanReport::default();
-    for row in rows.filter_map(|r| r.ok()) {
-        let (id, src, model, started, input, output, cread, cwrite, reasoning, actual, estimated, provider) = row;
+    for row in rows {
+        let (
+            id,
+            src,
+            model,
+            started,
+            input,
+            output,
+            cread,
+            cwrite,
+            reasoning,
+            actual,
+            estimated,
+            provider,
+        ) = row?;
         let mut e = UsageEvent::new(source::HERMES, surface::CLI, &ctx.instance, id.clone());
         e.session_id = id;
         e.project = src.and_then(|s| project_label(&s));
@@ -179,10 +216,14 @@ fn scan_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
             continue;
         }
         // Real billed amount beats an estimate, which beats computing from the price table.
-        e.cost_usd = actual.filter(|c| *c > 0.0).or_else(|| estimated.filter(|c| *c > 0.0));
+        e.cost_usd = actual
+            .filter(|c| *c > 0.0)
+            .or_else(|| estimated.filter(|c| *c > 0.0));
         e.provider = provider;
         // `started_at` is REAL epoch seconds.
-        e.timestamp = started.map(super::normalize_epoch).unwrap_or_else(crate::store::now_ms);
+        e.timestamp = started
+            .map(super::normalize_epoch)
+            .unwrap_or_else(crate::store::now_ms);
         report.events.push(e);
     }
     Ok(report)

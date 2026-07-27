@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
 
@@ -8,12 +8,21 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { TitleBar } from "./components/layout/TitleBar";
 import { Toast } from "./components/layout/Toast";
 import { Dashboard } from "./pages/Dashboard";
-import { UsagePage } from "./pages/Usage";
-import { ComparePage } from "./pages/Compare";
-import { AgentDetail } from "./pages/AgentDetail";
-import { SettingsPage } from "./pages/Settings";
 import { useBackendEvents, useSettings } from "./lib/hooks";
 import { isRoute, type Route } from "./routes";
+
+const UsagePage = lazy(() =>
+  import("./pages/Usage").then((module) => ({ default: module.UsagePage })),
+);
+const ComparePage = lazy(() =>
+  import("./pages/Compare").then((module) => ({ default: module.ComparePage })),
+);
+const AgentDetail = lazy(() =>
+  import("./pages/AgentDetail").then((module) => ({ default: module.AgentDetail })),
+);
+const SettingsPage = lazy(() =>
+  import("./pages/Settings").then((module) => ({ default: module.SettingsPage })),
+);
 
 /** Applies theme and background preferences to <html>, where the CSS variables live. */
 function useAppearance() {
@@ -106,11 +115,19 @@ export default function App() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
           >
-            {route === "dashboard" && <Dashboard onOpenAgent={(s) => navigate("agents", s)} />}
-            {route === "usage" && <UsagePage />}
-            {route === "compare" && <ComparePage />}
-            {route === "agents" && <AgentDetail source={activeSource} />}
-            {route === "settings" && <SettingsPage />}
+            <Suspense
+              fallback={
+                <div className="grid h-full place-items-center text-sm text-[rgb(var(--text-dim))]">
+                  Loading…
+                </div>
+              }
+            >
+              {route === "dashboard" && <Dashboard onOpenAgent={(s) => navigate("agents", s)} />}
+              {route === "usage" && <UsagePage />}
+              {route === "compare" && <ComparePage />}
+              {route === "agents" && <AgentDetail source={activeSource} />}
+              {route === "settings" && <SettingsPage />}
+            </Suspense>
           </motion.div>
         </main>
       </div>

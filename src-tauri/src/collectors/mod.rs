@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::model::{UsageEvent, LOCAL_INSTANCE};
+use crate::model::{PendingScanState, ScanState, UsageEvent, LOCAL_INSTANCE};
 use crate::pricing::Pricing;
 use crate::settings::AppSettings;
 use crate::store::{Store, WriteMode};
@@ -49,6 +49,8 @@ impl<'a> ScanCtx<'a> {
 #[derive(Debug, Default)]
 pub struct ScanReport {
     pub events: Vec<UsageEvent>,
+    /// Watermarks to commit atomically with `events`.
+    pub states: Vec<PendingScanState>,
     pub files_seen: i64,
     /// Rows the parser could not understand. Non-zero means possible schema drift.
     pub skipped: i64,
@@ -58,6 +60,7 @@ pub struct ScanReport {
 impl ScanReport {
     pub fn merge(&mut self, other: ScanReport) {
         self.events.extend(other.events);
+        self.states.extend(other.states);
         self.files_seen += other.files_seen;
         self.skipped += other.skipped;
         self.detected_paths.extend(other.detected_paths);
@@ -117,7 +120,12 @@ pub fn home_dir() -> PathBuf {
 
 /// Resolve an agent's root: explicit Settings override, then an environment variable the
 /// agent itself honours, then the conventional path.
-pub fn resolve_root(settings: &AppSettings, source: &str, env_var: Option<&str>, default: PathBuf) -> PathBuf {
+pub fn resolve_root(
+    settings: &AppSettings,
+    source: &str,
+    env_var: Option<&str>,
+    default: PathBuf,
+) -> PathBuf {
     if let Some(p) = settings.custom_path(source) {
         return p;
     }
@@ -222,7 +230,9 @@ pub fn open_sqlite_ro(path: &Path) -> Result<rusqlite::Connection> {
     use rusqlite::OpenFlags;
     let conn = rusqlite::Connection::open_with_flags(
         path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(std::time::Duration::from_secs(2))?;
     Ok(conn)
@@ -270,11 +280,18 @@ pub struct JsonlChunk {
 /// Rotation and truncation are detected by comparing the stored offset against the
 /// current size; when the file shrank, the watermark resets and the file is re-read.
 /// Since the writer may be mid-line, only content up to the final newline is consumed.
-pub fn read_new_lines(store: &Store, source: &str, instance: &str, path: &Path) -> Result<JsonlChunk> {
+pub fn read_new_lines(
+    store: &Store,
+    source: &str,
+    instance: &str,
+    path: &Path,
+) -> Result<JsonlChunk> {
     use std::io::{Read, Seek, SeekFrom};
 
     let key = path.to_string_lossy().to_string();
-    let state = store.get_scan_state(source, instance, &key).unwrap_or_default();
+    let state = store
+        .get_scan_state(source, instance, &key)
+        .unwrap_or_default();
     let size = file_size(path);
     let mtime = mtime_ms(path);
 
@@ -283,7 +300,11 @@ pub fn read_new_lines(store: &Store, source: &str, instance: &str, path: &Path) 
     } else {
         (
             state.offset,
-            state.extra.as_deref().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+            state
+                .extra
+                .as_deref()
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0),
         )
     };
 
@@ -333,18 +354,23 @@ pub fn read_new_lines(store: &Store, source: &str, instance: &str, path: &Path) 
     })
 }
 
-pub fn commit_scan_state(store: &Store, source: &str, instance: &str, path: &Path, chunk: &JsonlChunk) {
+pub fn pending_scan_state(
+    source: &str,
+    instance: &str,
+    path: &Path,
+    chunk: &JsonlChunk,
+) -> PendingScanState {
     let key = path.to_string_lossy().to_string();
-    let _ = store.set_scan_state(
-        source,
-        instance,
-        &key,
-        &crate::model::ScanState {
+    PendingScanState {
+        source: source.to_string(),
+        instance: instance.to_string(),
+        key,
+        state: ScanState {
             offset: chunk.new_offset,
             mtime_ms: chunk.mtime_ms,
             extra: Some(chunk.new_line_no.to_string()),
         },
-    );
+    }
 }
 
 /// Recursively list files under `root` whose name matches `pred`.
@@ -364,11 +390,17 @@ pub fn find_files(root: &Path, pred: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
 }
 
 pub fn has_ext(p: &Path, ext: &str) -> bool {
-    p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case(ext)).unwrap_or(false)
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case(ext))
+        .unwrap_or(false)
 }
 
 pub fn file_stem(p: &Path) -> String {
-    p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string()
+    p.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 pub fn sha_key(parts: &[&str]) -> String {

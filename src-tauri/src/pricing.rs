@@ -50,7 +50,10 @@ pub struct Pricing {
 /// Sources that report authoritative money amounts, which must not be overwritten by the
 /// estimated price table.
 pub fn source_has_native_cost(source: &str) -> bool {
-    matches!(source, crate::model::source::CURSOR | crate::model::source::HERMES)
+    matches!(
+        source,
+        crate::model::source::CURSOR | crate::model::source::HERMES
+    )
 }
 
 impl Pricing {
@@ -68,16 +71,14 @@ impl Pricing {
         let mut t = self.table.write();
         t.aliases = builtin_aliases();
 
-        let cached = std::fs::read_to_string(&self.cache_path)
-            .ok()
-            .filter(|_| {
-                std::fs::metadata(&self.cache_path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|m| m.elapsed().ok())
-                    .map(|age| (age.as_millis() as i64) < CACHE_TTL_MS)
-                    .unwrap_or(false)
-            });
+        let cached = std::fs::read_to_string(&self.cache_path).ok().filter(|_| {
+            std::fs::metadata(&self.cache_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| m.elapsed().ok())
+                .map(|age| (age.as_millis() as i64) < CACHE_TTL_MS)
+                .unwrap_or(false)
+        });
 
         let (json, label) = match cached {
             Some(c) => (c, "cache".to_string()),
@@ -123,7 +124,10 @@ impl Pricing {
         for (k, v) in overrides {
             t.overrides.insert(k, v);
         }
-        std::fs::write(&self.overrides_path, serde_json::to_string_pretty(&t.overrides)?)?;
+        std::fs::write(
+            &self.overrides_path,
+            serde_json::to_string_pretty(&t.overrides)?,
+        )?;
         Ok(())
     }
 
@@ -132,7 +136,10 @@ impl Pricing {
         let mut t = self.table.write();
         let removed = t.overrides.remove(model).is_some();
         if removed {
-            std::fs::write(&self.overrides_path, serde_json::to_string_pretty(&t.overrides)?)?;
+            std::fs::write(
+                &self.overrides_path,
+                serde_json::to_string_pretty(&t.overrides)?,
+            )?;
         }
         Ok(removed)
     }
@@ -169,20 +176,25 @@ impl Pricing {
     }
 
     /// Cost in USD, or `None` when the model has no price entry (rendered greyed out).
-    pub fn cost(&self, model_norm: &str, input: i64, output: i64, cache_read: i64, cache_write: i64) -> Option<f64> {
+    pub fn cost(
+        &self,
+        model_norm: &str,
+        input: i64,
+        output: i64,
+        cache_read: i64,
+        cache_write: i64,
+    ) -> Option<f64> {
         let p = self.price_for(model_norm)?;
-        // LiteLLM omits cache prices for models without prompt caching; fall back to the
-        // Anthropic/OpenAI convention of 1.25x write and 0.1x read.
-        let cw = if p.cache_creation_input_token_cost > 0.0 {
-            p.cache_creation_input_token_cost
-        } else {
-            p.input_cost_per_token * 1.25
-        };
-        let cr = if p.cache_read_input_token_cost > 0.0 {
-            p.cache_read_input_token_cost
-        } else {
-            p.input_cost_per_token * 0.1
-        };
+        // A missing cache price is not evidence that a vendor follows Anthropic's cache
+        // multipliers. Mark rows with such cache usage unpriced instead of silently
+        // manufacturing a precise-looking amount.
+        if (cache_write > 0 && p.cache_creation_input_token_cost <= 0.0)
+            || (cache_read > 0 && p.cache_read_input_token_cost <= 0.0)
+        {
+            return None;
+        }
+        let cw = p.cache_creation_input_token_cost;
+        let cr = p.cache_read_input_token_cost;
         Some(
             input as f64 * p.input_cost_per_token
                 + output as f64 * p.output_cost_per_token
@@ -236,14 +248,16 @@ fn normalize_with(t: &Table, raw: &str) -> Option<String> {
         return Some(trimmed);
     }
 
-    // Longest known key that the raw name starts with, so unreleased point revisions
-    // still land on the right family instead of falling through to `unknown`.
+    // Longest known family that the raw name extends. Do not match in the reverse
+    // direction: a generic raw name such as "gpt-4" must not be assigned an arbitrary,
+    // potentially more expensive variant.
     let mut best: Option<&String> = None;
     for key in t.prices.keys() {
-        if key.len() >= 6 && (stripped.starts_with(key.as_str()) || key.starts_with(stripped.as_str())) {
-            if best.map_or(true, |b| key.len() > b.len()) {
-                best = Some(key);
-            }
+        if key.len() >= 6
+            && stripped.starts_with(key.as_str())
+            && best.map_or(true, |b| key.len() > b.len())
+        {
+            best = Some(key);
         }
     }
     best.cloned()
@@ -259,7 +273,11 @@ fn version_variants(s: &str) -> Vec<String> {
     let mut swapped = String::new();
     let mut i = 0;
     while i < bytes.len() {
-        if i + 2 < bytes.len() && bytes[i].is_ascii_digit() && bytes[i + 1] == '-' && bytes[i + 2].is_ascii_digit() {
+        if i + 2 < bytes.len()
+            && bytes[i].is_ascii_digit()
+            && bytes[i + 1] == '-'
+            && bytes[i + 2].is_ascii_digit()
+        {
             swapped.push(bytes[i]);
             swapped.push('.');
             i += 2;
@@ -338,6 +356,32 @@ fn parse_litellm(json: &str) -> HashMap<String, ModelPrice> {
     out
 }
 
+/// Names that no price table will ever contain, mapped to their real billing model.
+fn builtin_aliases() -> HashMap<String, String> {
+    [
+        // Antigravity exposes routing labels rather than model ids.
+        ("gemini-pro-default", "gemini-2.5-pro"),
+        ("gemini-pro-c", "gemini-2.5-pro"),
+        ("gemini-pro-high", "gemini-2.5-pro"),
+        ("gemini-flash-default", "gemini-2.5-flash"),
+        ("gemini-3-flash-e", "gemini-3-flash"),
+        ("gemini-3-flash-a", "gemini-3-flash"),
+        ("gemini-3.1-pro-low", "gemini-3-pro-preview"),
+        ("gemini-3.1-pro", "gemini-3-pro-preview"),
+        ("claude-opus-4-6-thinking", "claude-opus-4-1"),
+        ("claude-sonnet-4-5-thinking", "claude-sonnet-4-5"),
+        // Cursor's dashboard uses short display names.
+        ("claude-4-sonnet", "claude-sonnet-4-20250514"),
+        ("claude-4-opus", "claude-opus-4-20250514"),
+        ("gpt-5", "gpt-5-2025-08-07"),
+        ("glm-latest", "glm-5.2"),
+        ("auto", "unknown"),
+    ]
+    .into_iter()
+    .map(|(a, b)| (a.to_string(), b.to_string()))
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,7 +415,10 @@ mod tests {
         ]);
 
         // Exact, case-insensitive.
-        assert_eq!(normalize_with(&t, "Claude-Sonnet-4").as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(
+            normalize_with(&t, "Claude-Sonnet-4").as_deref(),
+            Some("claude-sonnet-4")
+        );
         // Provider prefix stripped.
         assert_eq!(
             normalize_with(&t, "anthropic/claude-sonnet-4").as_deref(),
@@ -383,9 +430,15 @@ mod tests {
             Some("claude-sonnet-4")
         );
         // Alias for a routing label that no price table carries.
-        assert_eq!(normalize_with(&t, "gemini-pro-default").as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(
+            normalize_with(&t, "gemini-pro-default").as_deref(),
+            Some("gemini-2.5-pro")
+        );
         // An alias only applies when its target is actually priced.
-        assert_eq!(normalize_with(&table(&[("x-1234", 1.0, 1.0)]), "gemini-pro-default"), None);
+        assert_eq!(
+            normalize_with(&table(&[("x-1234", 1.0, 1.0)]), "gemini-pro-default"),
+            None
+        );
     }
 
     #[test]
@@ -402,12 +455,15 @@ mod tests {
             cache_path: dir.join("cache.json"),
             overrides_path: dir.join("overrides.json"),
         };
-        assert_eq!(p.normalize("some-unreleased-thing"), "some-unreleased-thing");
+        assert_eq!(
+            p.normalize("some-unreleased-thing"),
+            "some-unreleased-thing"
+        );
         assert_eq!(p.cost("some-unreleased-thing", 1000, 1000, 0, 0), None);
     }
 
     #[test]
-    fn cost_uses_cache_conventions_when_table_omits_them() {
+    fn cache_usage_without_explicit_rates_is_unpriced() {
         let dir = std::env::temp_dir().join("glassusage-pricing-test");
         std::fs::create_dir_all(&dir).unwrap();
         let p = Pricing {
@@ -415,9 +471,8 @@ mod tests {
             cache_path: dir.join("cache.json"),
             overrides_path: dir.join("overrides.json"),
         };
-        // 1 input + 1 output + 1 cache write (1.25x input) + 1 cache read (0.1x input).
-        let got = p.cost("m", 1, 1, 1, 1).unwrap();
-        assert!((got - (10.0 + 100.0 + 12.5 + 1.0)).abs() < 1e-9, "got {got}");
+        assert_eq!(p.cost("m", 1, 1, 1, 1), None);
+        assert_eq!(p.cost("m", 1, 1, 0, 0), Some(110.0));
     }
 
     #[test]
@@ -427,7 +482,11 @@ mod tests {
         let mut t = table(&[("m", 10.0, 10.0)]);
         t.overrides.insert(
             "m".into(),
-            ModelPrice { input_cost_per_token: 1.0, output_cost_per_token: 1.0, ..Default::default() },
+            ModelPrice {
+                input_cost_per_token: 1.0,
+                output_cost_per_token: 1.0,
+                ..Default::default()
+            },
         );
         let p = Pricing {
             table: RwLock::new(t),
@@ -451,12 +510,18 @@ mod tests {
         // ...and where both know a model, the fetched value wins.
         let fetched: HashMap<String, ModelPrice> = [(
             only_bundled.clone(),
-            ModelPrice { input_cost_per_token: 42.0, ..Default::default() },
+            ModelPrice {
+                input_cost_per_token: 42.0,
+                ..Default::default()
+            },
         )]
         .into_iter()
         .collect();
         assert_eq!(
-            merge_over_fallback(fetched).get(&only_bundled).unwrap().input_cost_per_token,
+            merge_over_fallback(fetched)
+                .get(&only_bundled)
+                .unwrap()
+                .input_cost_per_token,
             42.0
         );
     }
@@ -465,33 +530,8 @@ mod tests {
     fn free_models_are_not_indexed_as_priced() {
         // LiteLLM lists some entries with zero cost; treating those as "priced" would
         // report real usage as $0.00 instead of flagging it as unpriced.
-        let parsed = parse_litellm(r#"{"free-thing":{"input_cost_per_token":0,"output_cost_per_token":0}}"#);
+        let parsed =
+            parse_litellm(r#"{"free-thing":{"input_cost_per_token":0,"output_cost_per_token":0}}"#);
         assert!(parsed.is_empty());
     }
-}
-
-/// Names that no price table will ever contain, mapped to their real billing model.
-fn builtin_aliases() -> HashMap<String, String> {
-    [
-        // Antigravity exposes routing labels rather than model ids.
-        ("gemini-pro-default", "gemini-2.5-pro"),
-        ("gemini-pro-c", "gemini-2.5-pro"),
-        ("gemini-pro-high", "gemini-2.5-pro"),
-        ("gemini-flash-default", "gemini-2.5-flash"),
-        ("gemini-3-flash-e", "gemini-3-flash"),
-        ("gemini-3-flash-a", "gemini-3-flash"),
-        ("gemini-3.1-pro-low", "gemini-3-pro-preview"),
-        ("gemini-3.1-pro", "gemini-3-pro-preview"),
-        ("claude-opus-4-6-thinking", "claude-opus-4-1"),
-        ("claude-sonnet-4-5-thinking", "claude-sonnet-4-5"),
-        // Cursor's dashboard uses short display names.
-        ("claude-4-sonnet", "claude-sonnet-4-20250514"),
-        ("claude-4-opus", "claude-opus-4-20250514"),
-        ("gpt-5", "gpt-5-2025-08-07"),
-        ("glm-latest", "glm-5.2"),
-        ("auto", "unknown"),
-    ]
-    .into_iter()
-    .map(|(a, b)| (a.to_string(), b.to_string()))
-    .collect()
 }

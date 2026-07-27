@@ -142,7 +142,10 @@ pub fn snap_widget(app: &AppHandle) -> Result<()> {
     }
 
     if (x - left).abs() > 0.5 || (y - top).abs() > 0.5 {
-        window.set_position(tauri::LogicalPosition::new(screen_pos.x + x, screen_pos.y + y))?;
+        window.set_position(tauri::LogicalPosition::new(
+            screen_pos.x + x,
+            screen_pos.y + y,
+        ))?;
     }
     Ok(())
 }
@@ -169,6 +172,10 @@ pub fn apply_widget_compact(app: &AppHandle, compact: bool) {
     let Some(widget) = app.get_webview_window("widget") else {
         return;
     };
-    let (w, h) = if compact { (300.0, 78.0) } else { (360.0, 168.0) };
+    let (w, h) = if compact {
+        (300.0, 78.0)
+    } else {
+        (360.0, 168.0)
+    };
     let _ = widget.set_size(tauri::LogicalSize::new(w, h));
 }

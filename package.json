@@ -1,13 +1,14 @@
 {
   "name": "glassusage",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Real-time token usage monitor for local AI coding agents, with an Apple Liquid Glass UI.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "check:versions": "node scripts/check-version.mjs",
     "assets": "node scripts/generate-icon.mjs && node scripts/generate-lens-maps.mjs",
     "tauri": "tauri",
     "app:dev": "tauri dev",
@@ -15,7 +16,6 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
-    "@tanstack/react-virtual": "^3.14.8",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-dialog": "^2.7.2",
@@ -29,7 +29,7 @@
     "lucide-react": "^0.469.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "recharts": "^2.15.4",
+    "recharts": "^3.10.1",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

@@ -209,13 +209,15 @@ fn register_shortcut(app: &tauri::AppHandle, accelerator: &str) {
         tracing::warn!("invalid widget shortcut: {accelerator}");
         return;
     };
-    let result = app.global_shortcut().on_shortcut(shortcut, move |app, _sc, event| {
-        // Fire once per press, not again on release.
-        if event.state() != ShortcutState::Pressed {
-            return;
-        }
-        let _ = window::set_widget_mode(app, !window::widget_mode());
-    });
+    let result = app
+        .global_shortcut()
+        .on_shortcut(shortcut, move |app, _sc, event| {
+            // Fire once per press, not again on release.
+            if event.state() != ShortcutState::Pressed {
+                return;
+            }
+            let _ = window::set_widget_mode(app, !window::widget_mode());
+        });
     if let Err(e) = result {
         tracing::warn!("could not register {accelerator}: {e}");
     }

@@ -18,7 +18,12 @@ pub struct ClaudeCollector;
 
 impl ClaudeCollector {
     fn config_root(settings: &AppSettings) -> PathBuf {
-        resolve_root(settings, source::CLAUDE, Some("CLAUDE_CONFIG_DIR"), home_dir().join(".claude"))
+        resolve_root(
+            settings,
+            source::CLAUDE,
+            Some("CLAUDE_CONFIG_DIR"),
+            home_dir().join(".claude"),
+        )
     }
 
     /// Transcript directories. `transcripts/` is a legacy sibling of `projects/` that
@@ -63,8 +68,12 @@ impl ClaudeCollector {
         let mut ids = HashSet::new();
         for root in Self::desktop_meta_roots() {
             for file in find_files(&root, |p| has_ext(p, "json")) {
-                let Ok(text) = std::fs::read_to_string(&file) else { continue };
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+                let Ok(text) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
                 collect_cli_session_ids(&v, &mut ids);
             }
         }
@@ -85,7 +94,9 @@ fn collect_cli_session_ids(v: &serde_json::Value, out: &mut HashSet<String>) {
                 }
             }
         }
-        serde_json::Value::Array(items) => items.iter().for_each(|i| collect_cli_session_ids(i, out)),
+        serde_json::Value::Array(items) => {
+            items.iter().for_each(|i| collect_cli_session_ids(i, out))
+        }
         _ => {}
     }
 }
@@ -145,14 +156,22 @@ impl Collector for ClaudeCollector {
 
         let mut report = ScanReport {
             files_seen: files.len() as i64,
-            detected_paths: roots.iter().map(|p| p.to_string_lossy().to_string()).collect(),
+            detected_paths: roots
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect(),
             ..Default::default()
         };
 
         for (path, chunk, events, skipped) in per_file {
             report.events.extend(events);
             report.skipped += skipped;
-            commit_scan_state(ctx.store, source::CLAUDE, &ctx.instance, &path, &chunk);
+            report.states.push(pending_scan_state(
+                source::CLAUDE,
+                &ctx.instance,
+                &path,
+                &chunk,
+            ));
         }
 
         report.events = finalize(report.events, ctx.pricing);
@@ -182,8 +201,12 @@ fn parse_lines(
         if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
             continue;
         }
-        let Some(message) = v.get("message") else { continue };
-        let Some(usage) = message.get("usage") else { continue };
+        let Some(message) = v.get("message") else {
+            continue;
+        };
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
 
         let num = |k: &str| usage.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
         let input = num("input_tokens");
@@ -226,14 +249,20 @@ fn parse_lines(
 
         let mut e = UsageEvent::new(source::CLAUDE, surface_label, instance, dedup_key.clone());
         e.session_id = session_id;
-        e.project = v.get("cwd").and_then(|x| x.as_str()).and_then(project_label);
+        e.project = v
+            .get("cwd")
+            .and_then(|x| x.as_str())
+            .and_then(project_label);
         e.model = message
             .get("model")
             .and_then(|x| x.as_str())
             .unwrap_or("unknown")
             .to_string();
         e.provider = Some("anthropic".into());
-        e.timestamp = v.get("timestamp").and_then(parse_timestamp).unwrap_or_else(crate::store::now_ms);
+        e.timestamp = v
+            .get("timestamp")
+            .and_then(parse_timestamp)
+            .unwrap_or_else(crate::store::now_ms);
         e.input_tokens = input;
         e.output_tokens = output;
         e.cache_read_tokens = cache_read;
@@ -244,6 +273,9 @@ fn parse_lines(
         }
     }
 
-    let events = order.into_iter().filter_map(|k| by_key.remove(&k)).collect();
+    let events = order
+        .into_iter()
+        .filter_map(|k| by_key.remove(&k))
+        .collect();
     (events, skipped)
 }

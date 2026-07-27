@@ -11,6 +11,7 @@ pub mod password_ssh;
 pub mod ssh;
 pub mod sync;
 
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 pub use sync::{spawn_scheduler, sync_instance, test_instance, TestReport, TestStep};
@@ -63,6 +64,80 @@ pub struct RemoteInstanceInput {
     pub enabled: bool,
 }
 
+impl RemoteInstanceInput {
+    pub fn validate(&self) -> Result<()> {
+        let name = self.name.trim();
+        if name.is_empty() || name.len() > 64 {
+            bail!("instance name must be between 1 and 64 characters");
+        }
+        if name.eq_ignore_ascii_case(crate::model::LOCAL_INSTANCE) {
+            bail!("'local' is reserved for this machine");
+        }
+        if name.ends_with('.') {
+            bail!("instance name may not end with a dot");
+        }
+        if !name.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+        }) {
+            bail!("instance name must start with a letter or number and contain only letters, numbers, '.', '_' or '-'");
+        }
+        let stem = name
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || (stem.len() == 4
+                && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.as_bytes()[3].is_ascii_digit()
+                && stem.as_bytes()[3] != b'0');
+        if reserved {
+            bail!("instance name is reserved by Windows");
+        }
+        if !matches!(self.agent.as_str(), "hermes" | "openclaw") {
+            bail!("unsupported remote agent type");
+        }
+        let host = self.host.trim();
+        if host.is_empty()
+            || !host.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+            })
+        {
+            bail!("host contains unsupported characters");
+        }
+        let username = self.username.trim();
+        if username.is_empty()
+            || !username
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            bail!("username contains unsupported characters");
+        }
+        if !(1..=65_535).contains(&self.port) {
+            bail!("port must be between 1 and 65535");
+        }
+        if !matches!(self.auth_mode.as_str(), "key" | "agent" | "password") {
+            bail!("unsupported authentication mode");
+        }
+        if !(60..=3_600).contains(&self.poll_secs) {
+            bail!("poll interval must be between 60 and 3600 seconds");
+        }
+        for value in [
+            self.key_path.as_deref(),
+            self.remote_home.as_deref(),
+            self.remote_path.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.contains(['\0', '\r', '\n']) {
+                bail!("paths may not contain control characters");
+            }
+        }
+        Ok(())
+    }
+}
+
 fn default_port() -> i64 {
     22
 }
@@ -94,6 +169,25 @@ impl From<&RemoteInstanceInput> for RemoteInstance {
 }
 
 impl RemoteInstance {
+    pub fn validate(&self) -> Result<()> {
+        RemoteInstanceInput {
+            name: self.name.clone(),
+            agent: self.agent.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            username: self.username.clone(),
+            auth_mode: self.auth_mode.clone(),
+            key_path: self.key_path.clone(),
+            password: None,
+            remote_home: self.remote_home.clone(),
+            remote_path: self.remote_path.clone(),
+            poll_secs: self.poll_secs,
+            import_archives: self.import_archives,
+            enabled: self.enabled,
+        }
+        .validate()
+    }
+
     /// Default data paths per agent, used when `remote_path` is blank.
     pub fn default_remote_paths(&self, home: &str) -> Vec<String> {
         match self.agent.as_str() {
@@ -101,5 +195,51 @@ impl RemoteInstance {
             "openclaw" => vec![format!("{home}/.openclaw")],
             _ => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_input() -> RemoteInstanceInput {
+        RemoteInstanceInput {
+            name: "build-box".into(),
+            agent: "openclaw".into(),
+            host: "10.0.0.5".into(),
+            port: 22,
+            username: "ubuntu".into(),
+            auth_mode: "password".into(),
+            key_path: None,
+            password: Some("secret".into()),
+            remote_home: None,
+            remote_path: None,
+            poll_secs: 300,
+            import_archives: false,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn rejects_instance_names_that_can_escape_snapshot_root() {
+        for name in [
+            "../outside",
+            r"..\outside",
+            ".",
+            "CON",
+            "/absolute",
+            "local",
+            "LOCAL",
+            "name.",
+        ] {
+            let mut input = valid_input();
+            input.name = name.into();
+            assert!(input.validate().is_err(), "{name} should be rejected");
+        }
+    }
+
+    #[test]
+    fn accepts_safe_remote_configuration() {
+        assert!(valid_input().validate().is_ok());
     }
 }

@@ -103,7 +103,9 @@ impl Collector for AntigravityCollector {
         let mut report = ScanReport::default();
 
         for dir in Self::cli_dirs(ctx.settings) {
-            report.detected_paths.push(dir.to_string_lossy().to_string());
+            report
+                .detected_paths
+                .push(dir.to_string_lossy().to_string());
             for db in find_files(&dir, |p| has_ext(p, "db")) {
                 report.files_seen += 1;
                 match scan_cli_db(ctx, &db) {
@@ -118,7 +120,9 @@ impl Collector for AntigravityCollector {
 
         if ctx.settings.antigravity_ide_enabled {
             for dir in Self::ide_dirs(ctx.settings) {
-                report.detected_paths.push(dir.to_string_lossy().to_string());
+                report
+                    .detected_paths
+                    .push(dir.to_string_lossy().to_string());
                 for db in find_files(&dir, |p| has_ext(p, "db")) {
                     report.files_seen += 1;
                     match scan_ide_db(ctx, &db) {
@@ -132,7 +136,9 @@ impl Collector for AntigravityCollector {
             }
         } else {
             for dir in Self::ide_dirs(ctx.settings) {
-                report.detected_paths.push(format!("{} (disabled)", dir.to_string_lossy()));
+                report
+                    .detected_paths
+                    .push(format!("{} (disabled)", dir.to_string_lossy()));
             }
         }
 
@@ -157,42 +163,54 @@ fn scan_ide_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
         return Ok(ScanReport::default());
     }
     let max_idx: i64 = conn
-        .query_row("SELECT COALESCE(MAX(idx), -1) FROM gen_metadata", [], |r| r.get(0))
+        .query_row("SELECT COALESCE(MAX(idx), -1) FROM gen_metadata", [], |r| {
+            r.get(0)
+        })
         .unwrap_or(-1);
-    let watermark = if max_idx + 1 < state.offset { -1 } else { state.offset - 1 };
+    let watermark = if max_idx + 1 < state.offset {
+        -1
+    } else {
+        state.offset - 1
+    };
     if max_idx <= watermark {
         return Ok(ScanReport::default());
     }
 
     let conversation = file_stem(db_path);
-    let mut stmt = conn.prepare("SELECT idx, data FROM gen_metadata WHERE idx > ?1 ORDER BY idx")?;
+    let mut stmt =
+        conn.prepare("SELECT idx, data FROM gen_metadata WHERE idx > ?1 ORDER BY idx")?;
     let rows = stmt.query_map(params![watermark], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
     })?;
 
     let mut report = ScanReport::default();
-    for row in rows.filter_map(|r| r.ok()) {
-        let (idx, blob) = row;
+    for row in rows {
+        let (idx, blob) = row?;
         match decode_generation(&blob, &conversation, idx, &ctx.instance) {
             Some(e) => report.events.push(e),
             None => report.skipped += 1,
         }
     }
 
-    let _ = ctx.store.set_scan_state(
-        source::ANTIGRAVITY,
-        &ctx.instance,
-        &key,
-        &crate::model::ScanState {
+    report.states.push(crate::model::PendingScanState {
+        source: source::ANTIGRAVITY.to_string(),
+        instance: ctx.instance.clone(),
+        key,
+        state: crate::model::ScanState {
             offset: max_idx + 1,
             mtime_ms: mtime_ms(db_path),
             extra: None,
         },
-    );
+    });
     Ok(report)
 }
 
-fn decode_generation(blob: &[u8], conversation: &str, idx: i64, instance: &str) -> Option<UsageEvent> {
+fn decode_generation(
+    blob: &[u8],
+    conversation: &str,
+    idx: i64,
+    instance: &str,
+) -> Option<UsageEvent> {
     let root = protoscan::decode(blob)?;
     let outer = root.message(1)?;
     let usage = outer.message(4)?;
@@ -277,7 +295,8 @@ fn scan_cli_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
         cwrite = expr(&["cache_write_tokens", "tokens_cache_write"]),
         reasoning = expr(&["reasoning_tokens", "thoughts_tokens"]),
         model = pick(&["model", "model_name", "model_id"]).unwrap_or_else(|| "''".into()),
-        ts = pick(&["updated_at", "created_at", "timestamp", "time_created"]).unwrap_or_else(|| "0".into()),
+        ts = pick(&["updated_at", "created_at", "timestamp", "time_created"])
+            .unwrap_or_else(|| "0".into()),
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -296,8 +315,8 @@ fn scan_cli_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
 
     let stem = file_stem(db_path);
     let mut report = ScanReport::default();
-    for row in rows.filter_map(|r| r.ok()) {
-        let (id, input, output, cread, cwrite, reasoning, model, ts) = row;
+    for row in rows {
+        let (id, input, output, cread, cwrite, reasoning, model, ts) = row?;
         let mut e = UsageEvent::new(
             source::ANTIGRAVITY,
             surface::CLI,
@@ -305,7 +324,9 @@ fn scan_cli_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
             format!("cli:{stem}:{id}"),
         );
         e.session_id = if id.is_empty() { stem.clone() } else { id };
-        e.model = model.filter(|m| !m.is_empty()).unwrap_or_else(|| "unknown".into());
+        e.model = model
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| "unknown".into());
         e.provider = Some("google".into());
         e.input_tokens = input;
         e.output_tokens = output;
@@ -315,7 +336,10 @@ fn scan_cli_db(ctx: &ScanCtx, db_path: &std::path::Path) -> Result<ScanReport> {
         if e.is_empty() {
             continue;
         }
-        e.timestamp = ts.map(normalize_epoch).filter(|t| *t > 0).unwrap_or_else(crate::store::now_ms);
+        e.timestamp = ts
+            .map(normalize_epoch)
+            .filter(|t| *t > 0)
+            .unwrap_or_else(crate::store::now_ms);
         report.events.push(e);
     }
     Ok(report)

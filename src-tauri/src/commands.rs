@@ -24,7 +24,11 @@ pub fn get_overview(state: State<'_, Arc<AppState>>, range: TimeRange) -> Res<Ov
 }
 
 #[tauri::command]
-pub fn get_agent_stats(state: State<'_, Arc<AppState>>, source: String, range: TimeRange) -> Res<AgentStats> {
+pub fn get_agent_stats(
+    state: State<'_, Arc<AppState>>,
+    source: String,
+    range: TimeRange,
+) -> Res<AgentStats> {
     state.store.agent_stats(&source, range).map_err(err)
 }
 
@@ -53,17 +57,27 @@ pub fn get_usage_log(
 }
 
 #[tauri::command]
-pub fn get_provider_stats(state: State<'_, Arc<AppState>>, filter: UsageFilter) -> Res<Vec<GroupStat>> {
+pub fn get_provider_stats(
+    state: State<'_, Arc<AppState>>,
+    filter: UsageFilter,
+) -> Res<Vec<GroupStat>> {
     state.store.group_stats("provider", &filter).map_err(err)
 }
 
 #[tauri::command]
-pub fn get_model_stats(state: State<'_, Arc<AppState>>, filter: UsageFilter) -> Res<Vec<GroupStat>> {
+pub fn get_model_stats(
+    state: State<'_, Arc<AppState>>,
+    filter: UsageFilter,
+) -> Res<Vec<GroupStat>> {
     state.store.group_stats("model_norm", &filter).map_err(err)
 }
 
 #[tauri::command]
-pub fn get_group_stats(state: State<'_, Arc<AppState>>, column: String, filter: UsageFilter) -> Res<Vec<GroupStat>> {
+pub fn get_group_stats(
+    state: State<'_, Arc<AppState>>,
+    column: String,
+    filter: UsageFilter,
+) -> Res<Vec<GroupStat>> {
     state.store.group_stats(&column, &filter).map_err(err)
 }
 
@@ -76,7 +90,10 @@ pub fn get_source_health(state: State<'_, Arc<AppState>>) -> Res<Vec<SourceHealt
 pub fn get_filter_options(state: State<'_, Arc<AppState>>) -> Res<HashMap<String, Vec<String>>> {
     let mut out = HashMap::new();
     for col in ["provider", "model_norm", "instance", "source", "project"] {
-        out.insert(col.to_string(), state.store.distinct_values(col).unwrap_or_default());
+        out.insert(
+            col.to_string(),
+            state.store.distinct_values(col).unwrap_or_default(),
+        );
     }
     Ok(out)
 }
@@ -96,7 +113,10 @@ pub fn rescan_source(
         .clear_scan_state(&source, instance.as_deref())
         .map_err(err)?;
     if purge.unwrap_or(false) {
-        state.store.delete_source(&source, instance.as_deref()).map_err(err)?;
+        state
+            .store
+            .delete_source(&source, instance.as_deref())
+            .map_err(err)?;
     }
     let st = state.inner().clone();
     // Rescans can take seconds on a cold cache; do not block the IPC call.
@@ -141,9 +161,14 @@ pub fn get_settings(state: State<'_, Arc<AppState>>) -> Res<AppSettings> {
 }
 
 #[tauri::command]
-pub fn set_settings(app: AppHandle, state: State<'_, Arc<AppState>>, patch: serde_json::Value) -> Res<AppSettings> {
+pub fn set_settings(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    patch: serde_json::Value,
+) -> Res<AppSettings> {
     let prev = state.settings.get();
     let next = state.settings.patch(patch).map_err(err)?;
+    crate::watcher::request_reconfigure();
     // The window backdrop is owned by the OS, so it has to be re-applied here rather
     // than in CSS.
     crate::window::apply_material(&app, &next.material);
@@ -214,7 +239,11 @@ pub async fn refresh_pricing(state: State<'_, Arc<AppState>>) -> Res<usize> {
 }
 
 #[tauri::command]
-pub fn export_csv(state: State<'_, Arc<AppState>>, filter: UsageFilter, path: Option<String>) -> Res<String> {
+pub fn export_csv(
+    state: State<'_, Arc<AppState>>,
+    filter: UsageFilter,
+    path: Option<String>,
+) -> Res<String> {
     use std::io::Write;
 
     let target = match path {
@@ -249,13 +278,14 @@ pub fn export_csv(state: State<'_, Arc<AppState>>, filter: UsageFilter, path: Op
             let ts = chrono::DateTime::from_timestamp_millis(r.ts_ms)
                 .map(|d| d.with_timezone(&chrono::Local).to_rfc3339())
                 .unwrap_or_default();
-            let total = r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens;
+            let total =
+                r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens;
             let line = format!(
                 "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-                ts,
-                r.source,
-                r.surface,
-                r.instance,
+                csv_field(&ts),
+                csv_field(&r.source),
+                csv_field(&r.surface),
+                csv_field(&r.instance),
                 csv_field(r.provider.as_deref().unwrap_or("")),
                 csv_field(&r.model),
                 csv_field(&r.model_norm),
@@ -283,10 +313,20 @@ pub fn export_csv(state: State<'_, Arc<AppState>>, filter: UsageFilter, path: Op
 }
 
 fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
+    let protected = if s
+        .trim_start()
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '=' | '+' | '-' | '@'))
+    {
+        format!("'{s}")
     } else {
         s.to_string()
+    };
+    if protected.contains([',', '"', '\r', '\n']) {
+        format!("\"{}\"", protected.replace('"', "\"\""))
+    } else {
+        protected
     }
 }
 
@@ -302,7 +342,11 @@ fn default_export_path(data_dir: &std::path::Path, stem: &str, ext: &str) -> std
 }
 
 #[tauri::command]
-pub fn export_json(state: State<'_, Arc<AppState>>, filter: UsageFilter, path: Option<String>) -> Res<String> {
+pub fn export_json(
+    state: State<'_, Arc<AppState>>,
+    filter: UsageFilter,
+    path: Option<String>,
+) -> Res<String> {
     use std::io::Write;
 
     let target = match path {
@@ -310,15 +354,23 @@ pub fn export_json(state: State<'_, Arc<AppState>>, filter: UsageFilter, path: O
         _ => default_export_path(&state.data_dir, "glassusage-export", "json"),
     };
 
-    let mut rows = Vec::new();
+    let file = std::fs::File::create(&target).map_err(err)?;
+    let mut w = std::io::BufWriter::new(file);
+    w.write_all(b"[\n").map_err(err)?;
+    let mut first = true;
+    let mut write_error = None;
     state
         .store
         .for_each_usage_row(&filter, |r| {
+            if write_error.is_some() {
+                return;
+            }
             let ts = chrono::DateTime::from_timestamp_millis(r.ts_ms)
                 .map(|d| d.with_timezone(&chrono::Local).to_rfc3339())
                 .unwrap_or_default();
-            let total = r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens;
-            rows.push(serde_json::json!({
+            let total =
+                r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens;
+            let row = serde_json::json!({
                 "timestamp": ts,
                 "tsMs": r.ts_ms,
                 "source": r.source,
@@ -337,13 +389,24 @@ pub fn export_json(state: State<'_, Arc<AppState>>, filter: UsageFilter, path: O
                 "totalTokens": total,
                 "costUsd": r.cost_usd,
                 "unpriced": r.unpriced,
-            }));
+            });
+            let result = (|| -> Result<(), String> {
+                if !first {
+                    w.write_all(b",\n").map_err(|error| error.to_string())?;
+                }
+                serde_json::to_writer(&mut w, &row).map_err(|error| error.to_string())?;
+                first = false;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                write_error = Some(error);
+            }
         })
         .map_err(err)?;
-
-    let file = std::fs::File::create(&target).map_err(err)?;
-    let mut w = std::io::BufWriter::new(file);
-    serde_json::to_writer_pretty(&mut w, &rows).map_err(|e| e.to_string())?;
+    if let Some(error) = write_error {
+        return Err(error);
+    }
+    w.write_all(b"\n]\n").map_err(err)?;
     w.flush().map_err(err)?;
     Ok(target.to_string_lossy().to_string())
 }
@@ -387,13 +450,11 @@ pub fn list_remote_instances(state: State<'_, Arc<AppState>>) -> Res<Vec<RemoteI
 }
 
 #[tauri::command]
-pub fn upsert_remote_instance(state: State<'_, Arc<AppState>>, cfg: RemoteInstanceInput) -> Res<()> {
-    if cfg.name.trim().is_empty() {
-        return Err("Instance name is required".into());
-    }
-    if cfg.name.trim() == crate::model::LOCAL_INSTANCE {
-        return Err("'local' is reserved for this machine".into());
-    }
+pub fn upsert_remote_instance(
+    state: State<'_, Arc<AppState>>,
+    cfg: RemoteInstanceInput,
+) -> Res<()> {
+    cfg.validate().map_err(err)?;
     let inst: RemoteInstance = (&cfg).into();
     // The plaintext password exists only in this call; DPAPI-encrypt before it is stored.
     let secret = match cfg.password.as_deref().filter(|p| !p.is_empty()) {
@@ -409,7 +470,11 @@ pub fn delete_remote_instance(state: State<'_, Arc<AppState>>, name: String) -> 
 }
 
 #[tauri::command]
-pub async fn test_remote_instance(state: State<'_, Arc<AppState>>, cfg: RemoteInstanceInput) -> Res<TestReport> {
+pub async fn test_remote_instance(
+    state: State<'_, Arc<AppState>>,
+    cfg: RemoteInstanceInput,
+) -> Res<TestReport> {
+    cfg.validate().map_err(err)?;
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || crate::remote::test_instance(&st, &cfg))
         .await
@@ -417,7 +482,11 @@ pub async fn test_remote_instance(state: State<'_, Arc<AppState>>, cfg: RemoteIn
 }
 
 #[tauri::command]
-pub async fn sync_remote_instance(app: AppHandle, state: State<'_, Arc<AppState>>, name: String) -> Res<usize> {
+pub async fn sync_remote_instance(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    name: String,
+) -> Res<usize> {
     let st = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || crate::remote::sync_instance(&app, &st, &name))
         .await
@@ -475,7 +544,11 @@ pub fn window_close(app: AppHandle, label: String) -> Res<()> {
 }
 
 #[tauri::command]
-pub fn set_widget_always_on_top(app: AppHandle, state: State<'_, Arc<AppState>>, on: bool) -> Res<()> {
+pub fn set_widget_always_on_top(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    on: bool,
+) -> Res<()> {
     if let Some(w) = app.get_webview_window("widget") {
         w.set_always_on_top(on).map_err(err)?;
     }
@@ -504,4 +577,19 @@ pub fn open_data_dir(app: AppHandle, state: State<'_, Arc<AppState>>) -> Res<()>
     app.opener()
         .open_path(state.data_dir.to_string_lossy().to_string(), None::<&str>)
         .map_err(err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::csv_field;
+
+    #[test]
+    fn csv_fields_neutralize_spreadsheet_formulas() {
+        assert_eq!(
+            csv_field("=HYPERLINK(\"https://example.invalid\")"),
+            "\"'=HYPERLINK(\"\"https://example.invalid\"\")\""
+        );
+        assert_eq!(csv_field("  +1+1"), "'  +1+1");
+        assert_eq!(csv_field("ordinary"), "ordinary");
+    }
 }

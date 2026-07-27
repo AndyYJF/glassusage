@@ -114,6 +114,7 @@ impl Collector for CursorCollector {
             detected_paths: detected,
             events: finalize(pending, ctx.pricing),
             skipped: 0,
+            states: Vec::new(),
         })
     }
 }
@@ -122,7 +123,12 @@ impl Collector for CursorCollector {
 
 #[derive(Debug, Deserialize)]
 struct UsageEventsResponse {
-    #[serde(alias = "usageEvents", alias = "usage_events", alias = "usageEventsDisplay", default)]
+    #[serde(
+        alias = "usageEvents",
+        alias = "usage_events",
+        alias = "usageEventsDisplay",
+        default
+    )]
     usage_events: Vec<RawUsageEvent>,
     #[serde(alias = "totalUsageEventsCount", default)]
     total_usage_events_count: Option<i64>,
@@ -210,7 +216,9 @@ pub async fn fetch_usage_events(
     end_ms: i64,
     instance: &str,
 ) -> Result<Vec<UsageEvent>> {
-    let pasted = pasted.map(|s| normalize_credential(&s)).filter(|s| !s.is_empty());
+    let pasted = pasted
+        .map(|s| normalize_credential(&s))
+        .filter(|s| !s.is_empty());
     let token = token.filter(|s| !s.is_empty());
 
     if token.is_none() && pasted.is_none() {
@@ -343,8 +351,12 @@ async fn fetch_pages(
             return Err(anyhow!("HTTP {status}: {snippet}"));
         }
 
-        let parsed: UsageEventsResponse = serde_json::from_str(&text)
-            .map_err(|e| anyhow!("parse failed: {e}; body starts {:?}", text.chars().take(80).collect::<String>()))?;
+        let parsed: UsageEventsResponse = serde_json::from_str(&text).map_err(|e| {
+            anyhow!(
+                "parse failed: {e}; body starts {:?}",
+                text.chars().take(80).collect::<String>()
+            )
+        })?;
 
         let count = parsed.usage_events.len();
         for raw in parsed.usage_events {
@@ -366,7 +378,10 @@ async fn fetch_pages(
 }
 
 /// Plan-level usage summary for the Settings status line.
-pub async fn fetch_plan_usage(pasted: Option<String>, token: Option<String>) -> Result<serde_json::Value> {
+pub async fn fetch_plan_usage(
+    pasted: Option<String>,
+    token: Option<String>,
+) -> Result<serde_json::Value> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(std::time::Duration::from_secs(20))
@@ -387,10 +402,22 @@ pub async fn fetch_plan_usage(pasted: Option<String>, token: Option<String>) -> 
 
 fn to_event(raw: RawUsageEvent, instance: &str) -> Option<UsageEvent> {
     let usage = raw.token_usage.as_ref();
-    let input = usage.map(|u| u.input_tokens).or(raw.input_tokens).unwrap_or(0);
-    let output = usage.map(|u| u.output_tokens).or(raw.output_tokens).unwrap_or(0);
-    let cache_read = usage.map(|u| u.cache_read_tokens).or(raw.cache_read_tokens).unwrap_or(0);
-    let cache_write = usage.map(|u| u.cache_write_tokens).or(raw.cache_write_tokens).unwrap_or(0);
+    let input = usage
+        .map(|u| u.input_tokens)
+        .or(raw.input_tokens)
+        .unwrap_or(0);
+    let output = usage
+        .map(|u| u.output_tokens)
+        .or(raw.output_tokens)
+        .unwrap_or(0);
+    let cache_read = usage
+        .map(|u| u.cache_read_tokens)
+        .or(raw.cache_read_tokens)
+        .unwrap_or(0);
+    let cache_write = usage
+        .map(|u| u.cache_write_tokens)
+        .or(raw.cache_write_tokens)
+        .unwrap_or(0);
     if input + output + cache_read + cache_write == 0 {
         return None;
     }
@@ -453,7 +480,10 @@ mod tests {
             normalize_credential("WorkosCursorSessionToken=user_abc%3A%3Ajwt"),
             "user_abc%3A%3Ajwt"
         );
-        assert_eq!(normalize_credential("  user_abc%3A%3Ajwt  "), "user_abc%3A%3Ajwt");
+        assert_eq!(
+            normalize_credential("  user_abc%3A%3Ajwt  "),
+            "user_abc%3A%3Ajwt"
+        );
     }
 
     #[test]
