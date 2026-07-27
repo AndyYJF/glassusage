@@ -69,6 +69,6 @@ jobs:
             (`com.glassusage.desktop`) — data under `%APPDATA%\com.glassusage.desktop` is kept.
 
             In-app updates: Settings → Updates → Check for updates (signed via Tauri updater).
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

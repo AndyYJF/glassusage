@@ -171,29 +171,44 @@ async fn exec_async(session: &mut Handle<KnownHostVerifier>, command: &str) -> R
         .await
         .with_context(|| format!("failed to exec: {command}"))?;
 
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut code: Option<u32> = None;
+    let mut outcome = CommandOutcome::default();
 
-    loop {
-        match channel.wait().await {
-            Some(ChannelMsg::Data { ref data }) => stdout.extend_from_slice(data),
-            Some(ChannelMsg::ExtendedData { ref data, .. }) => stderr.extend_from_slice(data),
-            Some(ChannelMsg::ExitStatus { exit_status }) => code = Some(exit_status),
-            Some(ChannelMsg::Eof) | None => break,
-            _ => {}
-        }
+    // EOF only means that the remote side has finished sending data. RFC 4254
+    // allows the exit-status request to arrive after EOF, so keep draining the
+    // channel until it is actually closed (`wait()` returns `None`).
+    while let Some(message) = channel.wait().await {
+        outcome.record(message);
     }
 
-    let c = code.ok_or_else(|| anyhow!("SSH command ended without an exit status"))?;
+    let c = outcome
+        .code
+        .ok_or_else(|| anyhow!("SSH command ended without an exit status"))?;
     if c != 0 {
         bail!(
             "ssh exited with {c}: {}",
-            String::from_utf8_lossy(&stderr).trim()
+            String::from_utf8_lossy(&outcome.stderr).trim()
         );
     }
 
-    Ok(String::from_utf8_lossy(&stdout).to_string())
+    Ok(String::from_utf8_lossy(&outcome.stdout).to_string())
+}
+
+#[derive(Default)]
+struct CommandOutcome {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    code: Option<u32>,
+}
+
+impl CommandOutcome {
+    fn record(&mut self, message: ChannelMsg) {
+        match message {
+            ChannelMsg::Data { ref data } => self.stdout.extend_from_slice(data),
+            ChannelMsg::ExtendedData { ref data, .. } => self.stderr.extend_from_slice(data),
+            ChannelMsg::ExitStatus { exit_status } => self.code = Some(exit_status),
+            _ => {}
+        }
+    }
 }
 
 /// Stream a remote file over an `exec` channel (`cat`). This is typically much faster
@@ -224,9 +239,11 @@ async fn download_async(
     let mut code: Option<u32> = None;
     let mut last_log = std::time::Instant::now();
 
-    loop {
-        match channel.wait().await {
-            Some(ChannelMsg::Data { ref data }) => {
+    // As with regular commands, EOF can precede exit-status. Only `None`
+    // indicates that no more channel messages can arrive.
+    while let Some(message) = channel.wait().await {
+        match message {
+            ChannelMsg::Data { ref data } => {
                 file.write_all(data).await?;
                 written += data.len() as u64;
                 if last_log.elapsed().as_secs() >= 3 {
@@ -234,9 +251,8 @@ async fn download_async(
                     last_log = std::time::Instant::now();
                 }
             }
-            Some(ChannelMsg::ExtendedData { ref data, .. }) => stderr.extend_from_slice(data),
-            Some(ChannelMsg::ExitStatus { exit_status }) => code = Some(exit_status),
-            Some(ChannelMsg::Eof) | None => break,
+            ChannelMsg::ExtendedData { ref data, .. } => stderr.extend_from_slice(data),
+            ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
             _ => {}
         }
     }
@@ -297,4 +313,25 @@ pub fn require_password(password: &Option<String>) -> Result<&str> {
         .as_deref()
         .filter(|p| !p.is_empty())
         .ok_or_else(|| anyhow!("password authentication selected but no password is stored"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChannelMsg, CommandOutcome};
+
+    #[test]
+    fn eof_does_not_hide_a_later_exit_status() {
+        let mut outcome = CommandOutcome::default();
+        outcome.record(ChannelMsg::Data {
+            data: (&b"/root\n"[..]).into(),
+        });
+        outcome.record(ChannelMsg::Eof);
+
+        assert_eq!(outcome.code, None);
+
+        outcome.record(ChannelMsg::ExitStatus { exit_status: 0 });
+
+        assert_eq!(outcome.code, Some(0));
+        assert_eq!(outcome.stdout, b"/root\n");
+    }
 }
