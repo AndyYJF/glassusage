@@ -10,6 +10,7 @@ export const SOURCES = [
   "openclaw",
   "pi",
   "kimi",
+  "dsh",
 ] as const;
 
 export type SourceId = (typeof SOURCES)[number];

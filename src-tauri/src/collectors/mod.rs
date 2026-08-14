@@ -7,6 +7,7 @@ pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
+pub mod dsh;
 pub mod hermes;
 pub mod kimi;
 pub mod openclaw;
@@ -109,6 +110,7 @@ pub fn all_collectors() -> Vec<Arc<dyn Collector>> {
         Arc::new(openclaw::OpenClawCollector),
         Arc::new(pi::PiCollector),
         Arc::new(kimi::KimiCollector),
+        Arc::new(dsh::DshCollector),
     ]
 }
 

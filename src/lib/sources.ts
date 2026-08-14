@@ -75,6 +75,13 @@ export const SOURCE_META: Record<SourceId, SourceMeta> = {
     origin: "~/.kimi-code/sessions/**/wire.jsonl",
     realtime: true,
   },
+  dsh: {
+    id: "dsh",
+    label: "DeepSeek Harness",
+    colorVar: "--src-dsh",
+    origin: "~/.dsh/sessions/**/session.jsonl.zstd",
+    realtime: true,
+  },
 };
 
 export const SOURCE_LIST = Object.values(SOURCE_META);

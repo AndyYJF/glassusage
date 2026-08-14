@@ -149,5 +149,6 @@ await probeJsonl("Claude Code — ~/.claude/projects/**/*.jsonl", path.join(HOME
 await probeJsonl("Codex — ~/.codex/sessions/**/*.jsonl", path.join(HOME, ".codex", "sessions"));
 await probeJsonl("Pi — ~/.pi/agent/sessions/**/*.jsonl", path.join(HOME, ".pi", "agent", "sessions"));
 await probeJsonl("Kimi Code — ~/.kimi-code/sessions/**/wire.jsonl", path.join(HOME, ".kimi-code", "sessions"));
+listDir("DeepSeek Harness — ~/.dsh", path.join(HOME, ".dsh"), 3);
 listDir("OpenCode — ~/.local/share/opencode", path.join(HOME, ".local", "share", "opencode"));
 listDir("Gemini/Antigravity — ~/.gemini", path.join(HOME, ".gemini"), 3);
