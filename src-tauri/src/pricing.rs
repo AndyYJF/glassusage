@@ -444,6 +444,13 @@ mod tests {
             Some("kimi-k3")
         );
         assert_eq!(normalize_with(&t, "k3").as_deref(), Some("kimi-k3"));
+        // A newer Grok id must not collapse onto the older family price.
+        let t = table(&[("grok-4", 3e-6, 1.5e-5), ("grok-4.6", 2e-6, 6e-6)]);
+        assert_eq!(normalize_with(&t, "grok-4.6").as_deref(), Some("grok-4.6"));
+        assert_eq!(
+            normalize_with(&t, "xai/grok-4.6").as_deref(),
+            Some("grok-4.6")
+        );
         // An alias only applies when its target is actually priced.
         assert_eq!(
             normalize_with(&table(&[("x-1234", 1.0, 1.0)]), "gemini-pro-default"),

@@ -1,6 +1,6 @@
 [package]
 name = "glassusage"
-version = "0.6.0"
+version = "0.6.1"
 description = "Real-time token usage monitor for local AI coding agents"
 authors = ["GlassUsage"]
 edition = "2021"

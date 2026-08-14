@@ -979,13 +979,16 @@ impl Store {
         Ok(())
     }
 
-    /// Re-price rows after the price table or a user override changes.
+    /// Re-normalize and re-price rows after the price table or a user override changes.
+    ///
+    /// Native-cost sources keep their recorded USD, but `model_norm` is still refreshed so
+    /// a later exact price entry (e.g. `grok-4.6`) can unstick a stale family match.
     pub fn reprice(&self, pricer: &crate::pricing::Pricing) -> Result<usize> {
         let mut conn = self.conn.lock();
         let changes = {
             let mut stmt = conn.prepare(
-                "SELECT id, source, model_norm, input_tokens, output_tokens, cache_read_tokens,
-                        cache_write_tokens, cost_usd, ts_ms
+                "SELECT id, source, model, model_norm, input_tokens, output_tokens,
+                        cache_read_tokens, cache_write_tokens, cost_usd, ts_ms
                  FROM usage_events",
             )?;
             let it = stmt.query_map([], |r| {
@@ -993,23 +996,27 @@ impl Store {
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(3)?,
                     r.get::<_, i64>(4)?,
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
-                    r.get::<_, Option<f64>>(7)?,
-                    r.get::<_, i64>(8)?,
+                    r.get::<_, i64>(7)?,
+                    r.get::<_, Option<f64>>(8)?,
+                    r.get::<_, i64>(9)?,
                 ))
             })?;
             let mut changes = Vec::new();
             for row in it {
-                let (id, source, model, input, output, cread, cwrite, old_cost, ts_ms) = row?;
-                if crate::pricing::source_has_native_cost(&source) {
-                    continue;
-                }
-                let cost = pricer.cost(&model, input, output, cread, cwrite);
-                if cost != old_cost {
-                    changes.push((id, cost, ts_ms));
+                let (id, source, model, old_norm, input, output, cread, cwrite, old_cost, ts_ms) =
+                    row?;
+                let new_norm = pricer.normalize(&model);
+                let cost = if crate::pricing::source_has_native_cost(&source) {
+                    old_cost
+                } else {
+                    pricer.cost(&new_norm, input, output, cread, cwrite)
+                };
+                if new_norm != old_norm || cost != old_cost {
+                    changes.push((id, new_norm, cost, ts_ms));
                 }
             }
             changes
@@ -1021,10 +1028,11 @@ impl Store {
         let tx = conn.transaction()?;
         let mut touched = HashSet::new();
         {
-            let mut stmt =
-                tx.prepare_cached("UPDATE usage_events SET cost_usd = ?1 WHERE id = ?2")?;
-            for (id, cost, ts_ms) in &changes {
-                stmt.execute(params![cost, id])?;
+            let mut stmt = tx.prepare_cached(
+                "UPDATE usage_events SET model_norm = ?1, cost_usd = ?2 WHERE id = ?3",
+            )?;
+            for (id, model_norm, cost, ts_ms) in &changes {
+                stmt.execute(params![model_norm, cost, id])?;
                 if let Some(day) = day_for_timestamp(*ts_ms) {
                     touched.insert(day);
                 }
@@ -1537,5 +1545,54 @@ mod tests {
         assert_eq!(outcome.deltas[1].tokens, 5);
         assert!(!outcome.deltas[1].is_new_request);
         cleanup(store, path);
+    }
+
+    #[test]
+    fn reprice_renormalizes_stale_family_match_and_keeps_native_cost() {
+        let (store, path) = temporary_store("reprice-norm");
+        let timestamp = Local
+            .with_ymd_and_hms(2025, 1, 10, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let mut stale = event("pi-grok", timestamp);
+        stale.source = "pi".into();
+        stale.model = "grok-4.6".into();
+        stale.model_norm = "grok-4".into();
+        stale.cost_usd = Some(1.23);
+        store
+            .insert_events(&[stale], WriteMode::InsertOrIgnore)
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "glassusage-reprice-pricing-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pricing = crate::pricing::Pricing::new(&dir);
+        assert_eq!(store.reprice(&pricing).unwrap(), 1);
+
+        let conn = store.conn.lock();
+        let (norm, cost): (String, f64) = conn
+            .query_row(
+                "SELECT model_norm, cost_usd FROM usage_events WHERE dedup_key='pi-grok'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let rollup: String = conn
+            .query_row(
+                "SELECT model_norm FROM daily_rollup WHERE source='pi'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(norm, "grok-4.6");
+        assert!((cost - 1.23).abs() < f64::EPSILON);
+        assert_eq!(rollup, "grok-4.6");
+        cleanup(store, path);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
