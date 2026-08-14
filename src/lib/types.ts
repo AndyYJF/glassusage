@@ -8,6 +8,8 @@ export const SOURCES = [
   "opencode",
   "hermes",
   "openclaw",
+  "pi",
+  "kimi",
 ] as const;
 
 export type SourceId = (typeof SOURCES)[number];

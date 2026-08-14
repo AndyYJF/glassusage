@@ -12,6 +12,8 @@ pub mod source {
     pub const OPENCODE: &str = "opencode";
     pub const HERMES: &str = "hermes";
     pub const OPENCLAW: &str = "openclaw";
+    pub const PI: &str = "pi";
+    pub const KIMI: &str = "kimi";
 
     pub const ALL: &[&str] = &[
         CLAUDE,
@@ -21,6 +23,8 @@ pub mod source {
         OPENCODE,
         HERMES,
         OPENCLAW,
+        PI,
+        KIMI,
     ];
 }
 

@@ -17,6 +17,8 @@ proxy, intercept, or man-in-the-middle any traffic, and it never sends your data
 | OpenCode | `~/.local/share/opencode` storage | File watcher |
 | Hermes Agent | `~/.hermes/state.db` | File watcher |
 | OpenClaw | `~/.openclaw` databases and archives | File watcher |
+| Pi | `~/.pi/agent/sessions/**/*.jsonl` | File watcher |
+| Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` | File watcher |
 
 Remote Hermes and OpenClaw instances can be added over SSH. GlassUsage pulls a consistent
 read-only snapshot of the remote SQLite file; nothing is installed on the remote host.
@@ -133,7 +135,7 @@ src/                     React UI
   widget/                Always-on-top mini card (separate window)
   lib/                   Typed IPC layer, formatting, hooks, UI state
 src-tauri/src/
-  collectors/            One module per agent, plus the protobuf reader
+  collectors/            One module per agent (incl. Pi and Kimi Code), plus the protobuf reader
   store.rs               SQLite schema, deduplication, rollups, queries
   pricing.rs             Price table, model normalization, overrides
   live.rs                Sliding-window RPM/TPM

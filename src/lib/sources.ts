@@ -61,6 +61,20 @@ export const SOURCE_META: Record<SourceId, SourceMeta> = {
     origin: "~/.openclaw databases and archives",
     realtime: true,
   },
+  pi: {
+    id: "pi",
+    label: "Pi",
+    colorVar: "--src-pi",
+    origin: "~/.pi/agent/sessions/**/*.jsonl",
+    realtime: true,
+  },
+  kimi: {
+    id: "kimi",
+    label: "Kimi Code",
+    colorVar: "--src-kimi",
+    origin: "~/.kimi-code/sessions/**/wire.jsonl",
+    realtime: true,
+  },
 };
 
 export const SOURCE_LIST = Object.values(SOURCE_META);

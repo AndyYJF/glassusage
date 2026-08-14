@@ -8,8 +8,10 @@ pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub mod hermes;
+pub mod kimi;
 pub mod openclaw;
 pub mod opencode;
+pub mod pi;
 pub mod protoscan;
 
 use std::path::{Path, PathBuf};
@@ -105,6 +107,8 @@ pub fn all_collectors() -> Vec<Arc<dyn Collector>> {
         Arc::new(opencode::OpenCodeCollector),
         Arc::new(hermes::HermesCollector),
         Arc::new(openclaw::OpenClawCollector),
+        Arc::new(pi::PiCollector),
+        Arc::new(kimi::KimiCollector),
     ]
 }
 
@@ -298,14 +302,7 @@ pub fn read_new_lines(
     let (mut offset, mut line_no) = if size < state.offset {
         (0, 0)
     } else {
-        (
-            state.offset,
-            state
-                .extra
-                .as_deref()
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0),
-        )
+        (state.offset, line_no_from_extra(state.extra.as_deref()))
     };
 
     if offset >= size {
@@ -352,6 +349,24 @@ pub fn read_new_lines(
         new_line_no: line_no,
         mtime_ms: mtime,
     })
+}
+
+/// Line number stored in `scan_state.extra`.
+///
+/// Most collectors write a bare integer. Collectors that also persist file-local
+/// metadata (model, session id, …) write a JSON object with a `line_no` field
+/// instead; both shapes must keep incremental reads aligned.
+pub fn line_no_from_extra(extra: Option<&str>) -> i64 {
+    let Some(s) = extra.map(str::trim).filter(|s| !s.is_empty()) else {
+        return 0;
+    };
+    if let Ok(n) = s.parse::<i64>() {
+        return n;
+    }
+    serde_json::from_str::<serde_json::Value>(s)
+        .ok()
+        .and_then(|v| v.get("line_no").and_then(|x| x.as_i64()))
+        .unwrap_or(0)
 }
 
 pub fn pending_scan_state(

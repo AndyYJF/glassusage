@@ -52,7 +52,7 @@ pub struct Pricing {
 pub fn source_has_native_cost(source: &str) -> bool {
     matches!(
         source,
-        crate::model::source::CURSOR | crate::model::source::HERMES
+        crate::model::source::CURSOR | crate::model::source::HERMES | crate::model::source::PI
     )
 }
 
@@ -376,6 +376,9 @@ fn builtin_aliases() -> HashMap<String, String> {
         ("gpt-5", "gpt-5-2025-08-07"),
         ("glm-latest", "glm-5.2"),
         ("auto", "unknown"),
+        // Kimi Code CLI reports routing labels, not LiteLLM ids.
+        ("kimi-code/k3", "kimi-k3"),
+        ("k3", "kimi-k3"),
     ]
     .into_iter()
     .map(|(a, b)| (a.to_string(), b.to_string()))
@@ -434,6 +437,13 @@ mod tests {
             normalize_with(&t, "gemini-pro-default").as_deref(),
             Some("gemini-2.5-pro")
         );
+        // Kimi Code CLI model ids.
+        let t = table(&[("kimi-k3", 3e-6, 1.5e-5)]);
+        assert_eq!(
+            normalize_with(&t, "kimi-code/k3").as_deref(),
+            Some("kimi-k3")
+        );
+        assert_eq!(normalize_with(&t, "k3").as_deref(), Some("kimi-k3"));
         // An alias only applies when its target is actually priced.
         assert_eq!(
             normalize_with(&table(&[("x-1234", 1.0, 1.0)]), "gemini-pro-default"),
