@@ -35,6 +35,8 @@ pub struct RemoteInstance {
     pub enabled: bool,
     /// Whether a DPAPI-encrypted secret is stored. The secret itself is never returned.
     pub has_secret: bool,
+    /// Optional HTTP proxy (`http://host:port`) tunnelled through with CONNECT.
+    pub proxy_url: Option<String>,
 }
 
 /// Shape accepted from the UI. The password is present only at save time.
@@ -62,6 +64,8 @@ pub struct RemoteInstanceInput {
     pub import_archives: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
 }
 
 impl RemoteInstanceInput {
@@ -126,12 +130,30 @@ impl RemoteInstanceInput {
             self.key_path.as_deref(),
             self.remote_home.as_deref(),
             self.remote_path.as_deref(),
+            self.proxy_url.as_deref(),
         ]
         .into_iter()
         .flatten()
         {
             if value.contains(['\0', '\r', '\n']) {
                 bail!("paths may not contain control characters");
+            }
+        }
+        if let Some(proxy) = self.proxy_url.as_deref().filter(|p| !p.trim().is_empty()) {
+            let rest = proxy
+                .trim()
+                .strip_prefix("http://")
+                .ok_or_else(|| anyhow::anyhow!("proxy must look like http://host:port"))?;
+            let host_port = rest.split('/').next().unwrap_or_default();
+            let valid = host_port.split(':').count() == 2
+                && host_port.split(':').all(|part| {
+                    !part.is_empty()
+                        && part
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+                });
+            if !valid {
+                bail!("proxy must look like http://host:port");
             }
         }
         Ok(())
@@ -164,6 +186,12 @@ impl From<&RemoteInstanceInput> for RemoteInstance {
             import_archives: i.import_archives,
             enabled: i.enabled,
             has_secret: i.password.is_some(),
+            proxy_url: i
+                .proxy_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string),
         }
     }
 }
@@ -184,6 +212,7 @@ impl RemoteInstance {
             poll_secs: self.poll_secs,
             import_archives: self.import_archives,
             enabled: self.enabled,
+            proxy_url: self.proxy_url.clone(),
         }
         .validate()
     }
@@ -217,6 +246,7 @@ mod tests {
             poll_secs: 300,
             import_archives: false,
             enabled: true,
+            proxy_url: None,
         }
     }
 

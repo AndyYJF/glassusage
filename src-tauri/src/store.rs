@@ -145,6 +145,28 @@ impl Store {
             );
             "#,
         )?;
+        Self::ensure_column(&conn, "remote_instances", "proxy_url", "TEXT")?;
+        Ok(())
+    }
+
+    /// Idempotent column add for tables created before the column existed.
+    fn ensure_column(
+        conn: &rusqlite::Connection,
+        table: &str,
+        column: &str,
+        col_type: &str,
+    ) -> Result<()> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let exists = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == column);
+        if !exists {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {col_type}"),
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -1051,7 +1073,8 @@ impl Store {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT name, agent, host, port, username, auth_mode, key_path, remote_home,
-                    remote_path, poll_secs, import_archives, enabled, secret_dpapi IS NOT NULL
+                    remote_path, poll_secs, import_archives, enabled, secret_dpapi IS NOT NULL,
+                    proxy_url
              FROM remote_instances ORDER BY name",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1069,6 +1092,7 @@ impl Store {
                 import_archives: r.get::<_, i64>(10)? == 1,
                 enabled: r.get::<_, i64>(11)? == 1,
                 has_secret: r.get::<_, i64>(12)? == 1,
+                proxy_url: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1086,15 +1110,15 @@ impl Store {
             conn.execute(
                 "INSERT INTO remote_instances
                    (name, agent, host, port, username, auth_mode, key_path, secret_dpapi,
-                    remote_home, remote_path, poll_secs, import_archives, enabled)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                    remote_home, remote_path, poll_secs, import_archives, enabled, proxy_url)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
                  ON CONFLICT(name) DO UPDATE SET
                    agent=excluded.agent, host=excluded.host, port=excluded.port,
                    username=excluded.username, auth_mode=excluded.auth_mode,
                    key_path=excluded.key_path, secret_dpapi=excluded.secret_dpapi,
                    remote_home=excluded.remote_home, remote_path=excluded.remote_path,
                    poll_secs=excluded.poll_secs, import_archives=excluded.import_archives,
-                   enabled=excluded.enabled",
+                   enabled=excluded.enabled, proxy_url=excluded.proxy_url",
                 params![
                     inst.name,
                     inst.agent,
@@ -1108,21 +1132,23 @@ impl Store {
                     inst.remote_path,
                     inst.poll_secs,
                     inst.import_archives as i64,
-                    inst.enabled as i64
+                    inst.enabled as i64,
+                    inst.proxy_url
                 ],
             )?;
         } else {
             conn.execute(
                 "INSERT INTO remote_instances
                    (name, agent, host, port, username, auth_mode, key_path,
-                    remote_home, remote_path, poll_secs, import_archives, enabled)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+                    remote_home, remote_path, poll_secs, import_archives, enabled, proxy_url)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
                  ON CONFLICT(name) DO UPDATE SET
                    agent=excluded.agent, host=excluded.host, port=excluded.port,
                    username=excluded.username, auth_mode=excluded.auth_mode,
                    key_path=excluded.key_path, remote_home=excluded.remote_home,
                    remote_path=excluded.remote_path, poll_secs=excluded.poll_secs,
-                   import_archives=excluded.import_archives, enabled=excluded.enabled",
+                   import_archives=excluded.import_archives, enabled=excluded.enabled,
+                   proxy_url=excluded.proxy_url",
                 params![
                     inst.name,
                     inst.agent,
@@ -1135,7 +1161,8 @@ impl Store {
                     inst.remote_path,
                     inst.poll_secs,
                     inst.import_archives as i64,
-                    inst.enabled as i64
+                    inst.enabled as i64,
+                    inst.proxy_url
                 ],
             )?;
         }

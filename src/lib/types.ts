@@ -211,6 +211,7 @@ export interface RemoteInstance {
   importArchives: boolean;
   enabled: boolean;
   hasSecret: boolean;
+  proxyUrl: string | null;
 }
 
 export type RemoteInstanceInput = Omit<RemoteInstance, "hasSecret"> & {

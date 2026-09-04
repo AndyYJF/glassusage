@@ -11,7 +11,8 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{anyhow, bail, Context, Result};
 use russh::client::{self, Handle};
 use russh::ChannelMsg;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 
 const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -82,6 +83,7 @@ impl PasswordSession {
         username: &str,
         password: &str,
         known_hosts_path: &Path,
+        proxy_url: Option<&str>,
     ) -> Result<Self> {
         let handle = runtime().block_on(connect_async(
             host,
@@ -89,6 +91,7 @@ impl PasswordSession {
             username,
             password,
             known_hosts_path,
+            proxy_url,
         ))?;
         Ok(Self { handle })
     }
@@ -130,6 +133,7 @@ async fn connect_async(
     username: &str,
     password: &str,
     known_hosts_path: &Path,
+    proxy_url: Option<&str>,
 ) -> Result<Handle<KnownHostVerifier>> {
     // Large transfers (OpenClaw agent DBs) need room; keep the session alive for the
     // whole sync rather than treating quiet moments between commands as dead.
@@ -146,9 +150,18 @@ async fn connect_async(
         port,
         path: known_hosts_path.to_path_buf(),
     };
-    let mut session = client::connect(config, (host, port), verifier)
-        .await
-        .with_context(|| format!("TCP connect to {host}:{port} failed"))?;
+
+    let mut session = match proxy_url {
+        Some(proxy) => {
+            let stream = http_connect(proxy, host, port).await?;
+            client::connect_stream(config, stream, verifier)
+                .await
+                .with_context(|| format!("SSH handshake via proxy {proxy} failed"))?
+        }
+        None => client::connect(config, (host, port), verifier)
+            .await
+            .with_context(|| format!("TCP connect to {host}:{port} failed"))?,
+    };
 
     let result = session
         .authenticate_password(username, password)
@@ -159,6 +172,61 @@ async fn connect_async(
         bail!("SSH password authentication rejected");
     }
     Ok(session)
+}
+
+/// Tunnel `host:port` through an HTTP proxy (`http://proxy-host:port`) with CONNECT.
+/// Direct routes to some hosts get throttled to a crawl while a local proxy stays fast.
+async fn http_connect(proxy_url: &str, host: &str, port: u16) -> Result<TcpStream> {
+    let without_scheme = proxy_url
+        .trim()
+        .strip_prefix("http://")
+        .ok_or_else(|| anyhow!("proxy must look like http://host:port"))?;
+    let authority = without_scheme.split('/').next().unwrap_or_default();
+    let (proxy_host, proxy_port) = authority
+        .split_once(':')
+        .ok_or_else(|| anyhow!("proxy must look like http://host:port"))?;
+    let proxy_port: u16 = proxy_port
+        .parse()
+        .with_context(|| format!("invalid proxy port in {proxy_url:?}"))?;
+
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TcpStream::connect((proxy_host, proxy_port)),
+    )
+    .await
+    .map_err(|_| anyhow!("TCP connect to proxy {authority} timed out"))?
+    .with_context(|| format!("TCP connect to proxy {authority} failed"))?;
+
+    let request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
+    stream.write_all(request.as_bytes()).await?;
+
+    // Read the response header one byte at a time so nothing past `\r\n\r\n` (the
+    // server's SSH banner may follow immediately) is swallowed.
+    let mut header = Vec::with_capacity(128);
+    loop {
+        let mut byte = [0u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .await
+            .context("proxy closed the connection during CONNECT")?;
+        header.push(byte[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if header.len() > 8192 {
+            bail!("proxy CONNECT response header too long");
+        }
+    }
+    let head = String::from_utf8_lossy(&header);
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok());
+    match status {
+        Some(200) => Ok(stream),
+        other => bail!("proxy CONNECT to {host}:{port} failed: status {other:?}"),
+    }
 }
 
 async fn exec_async(session: &mut Handle<KnownHostVerifier>, command: &str) -> Result<String> {

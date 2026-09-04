@@ -73,6 +73,7 @@ impl SshClient {
                 &self.instance.username,
                 password,
                 &self.known_hosts_path,
+                self.instance.proxy_url.as_deref(),
             )?);
         }
         f(guard.as_mut().unwrap())

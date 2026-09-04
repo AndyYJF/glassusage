@@ -32,6 +32,7 @@ const BLANK: RemoteInstanceInput = {
   pollSecs: 300,
   importArchives: false,
   enabled: true,
+  proxyUrl: null,
 };
 
 function Field({
@@ -289,6 +290,18 @@ export function RemoteInstances() {
               value={String(draft.pollSecs)}
               onChange={(v) => set({ pollSecs: Number(v) || 300 })}
             />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Field
+              label={t("remote.proxy")}
+              value={draft.proxyUrl ?? ""}
+              onChange={(v) => set({ proxyUrl: v.trim() === "" ? null : v })}
+              placeholder="http://127.0.0.1:7890"
+            />
+            <span className="mt-4 shrink-0 text-[0.6875rem] text-[rgb(var(--text-dim))]">
+              {t("remote.proxyHint")}
+            </span>
           </div>
 
           <div className="flex items-center gap-2">
