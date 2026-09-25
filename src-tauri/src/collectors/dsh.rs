@@ -1,10 +1,17 @@
 //! DeepSeek Harness (`dsh`).
 //!
-//! Official sessions live under `$DSH_HOME/sessions` (default `~/.dsh/sessions`) as
-//! `**/session.jsonl.zstd`: concatenated Zstandard frames, one header frame then one
-//! frame per append batch. Each decoded line is a session event. Provider usage is on
-//! `assistant/message.data.usage`; reasoning is a subset of output and is not added
-//! again. Model/provider come from the message source or the last `request/header`.
+//! Official sessions live under `$DSH_HOME/sessions` (default `~/.dsh/sessions`).
+//! Each session directory keeps generational logs: `session.jsonl.zstd` (v0) and
+//! `session.vN.jsonl.zstd`. Only the highest generation is live; older files are
+//! frozen migration snapshots and summing them would count the same calls twice.
+//!
+//! A log is concatenated Zstandard frames, one header frame then one frame per
+//! append batch. Usage is folded like `@deepseek-ai/dsh-token-meter`'s `tokenUsage`
+//! projection: `assistant/message` and `assistant/attempt` samples for the same
+//! turn/step replace each other, `llm/retry-started` closes that slot so the retry
+//! is added, and `compaction/summary` usage is added on its own. Reasoning is a
+//! subset of output and is not added again. Model/provider come from the message
+//! source or the last `request/header`.
 
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -14,6 +21,13 @@ use rayon::prelude::*;
 
 use super::*;
 use crate::model::{source, surface, PendingScanState, ScanState, UsageEvent};
+use crate::store::{Store, WriteMode};
+
+/// Bumped when the on-disk fold no longer matches previously stored dedup keys.
+/// A lower marker wipes this instance's dsh rows once and rereads the latest
+/// generation; v0 and v3 logs assign different `seq` values to the same call.
+const FOLD_VERSION: i64 = 2;
+const FOLD_MARKER: &str = "dsh-fold-version";
 
 pub struct DshCollector;
 
@@ -36,6 +50,38 @@ struct DshFileState {
     model: String,
     #[serde(default)]
     provider: String,
+    /// `seq` of the assistant sample currently open for replacement.
+    #[serde(default)]
+    slot_seq: i64,
+    #[serde(default)]
+    slot_open: bool,
+    #[serde(default)]
+    slot_turn: Option<i64>,
+    #[serde(default)]
+    slot_step: Option<i64>,
+    #[serde(default)]
+    slot_input: i64,
+    #[serde(default)]
+    slot_output: i64,
+    #[serde(default)]
+    slot_cache_read: i64,
+    #[serde(default)]
+    slot_cache_write: i64,
+    #[serde(default)]
+    slot_reasoning: i64,
+}
+
+#[derive(Debug, Default, Clone)]
+struct UsageFold {
+    slot_seq: i64,
+    slot_open: bool,
+    slot_turn: Option<i64>,
+    slot_step: Option<i64>,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
 }
 
 impl DshCollector {
@@ -62,6 +108,11 @@ impl Collector for DshCollector {
         "DeepSeek Harness"
     }
 
+    fn write_mode(&self) -> WriteMode {
+        // A later sample for the same turn/step replaces the open slot's row.
+        WriteMode::Upsert
+    }
+
     fn detect(&self, settings: &AppSettings) -> Vec<PathBuf> {
         let dir = Self::sessions_dir(settings);
         if dir.is_dir() {
@@ -84,14 +135,7 @@ impl Collector for DshCollector {
             return Ok(ScanReport::default());
         }
 
-        let files: Vec<PathBuf> = find_files(&root, is_session_log);
-        let per_file: Vec<(PathBuf, JsonlChunk, FileMeta, Vec<UsageEvent>, i64)> = files
-            .par_iter()
-            .filter_map(|path| parse_file(ctx, path))
-            .collect();
-
         let mut report = ScanReport {
-            files_seen: files.len() as i64,
             detected_paths: if root.is_dir() {
                 vec![root.to_string_lossy().to_string()]
             } else {
@@ -99,8 +143,30 @@ impl Collector for DshCollector {
             },
             ..Default::default()
         };
+        if stored_fold_version(ctx.store, &ctx.instance) < FOLD_VERSION {
+            // v0 watermarks point at a different file than v3, and the two
+            // generations number `seq` differently, so old rows cannot be reused.
+            ctx.store.delete_source(source::DSH, Some(&ctx.instance))?;
+            ctx.store
+                .clear_scan_state(source::DSH, Some(&ctx.instance))?;
+            report.states.push(fold_marker(&ctx.instance));
+        }
 
-        for (path, chunk, meta, events, skipped) in per_file {
+        let files = choose_latest_logs(find_files(&root, is_session_log));
+        let per_file: Vec<(
+            PathBuf,
+            JsonlChunk,
+            FileMeta,
+            UsageFold,
+            Vec<UsageEvent>,
+            i64,
+        )> = files
+            .par_iter()
+            .filter_map(|path| parse_file(ctx, path))
+            .collect();
+
+        report.files_seen = files.len() as i64;
+        for (path, chunk, meta, fold, events, skipped) in per_file {
             report.events.extend(events);
             report.skipped += skipped;
             report.states.push(PendingScanState {
@@ -110,14 +176,7 @@ impl Collector for DshCollector {
                 state: ScanState {
                     offset: chunk.new_offset,
                     mtime_ms: chunk.mtime_ms,
-                    extra: serde_json::to_string(&DshFileState {
-                        line_no: chunk.new_line_no,
-                        session_id: meta.session_id,
-                        project: meta.project,
-                        model: meta.model,
-                        provider: meta.provider,
-                    })
-                    .ok(),
+                    extra: serde_json::to_string(&file_state(&meta, &fold, chunk.new_line_no)).ok(),
                 },
             });
         }
@@ -128,25 +187,108 @@ impl Collector for DshCollector {
 }
 
 fn is_session_log(path: &Path) -> bool {
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    name == "session.jsonl.zstd" || name == "session.jsonl"
+    session_log_rank(path).is_some()
+}
+
+/// `(generation, is_zstd)`. v0 is `session.jsonl[.zstd]`; later gens are `session.vN.jsonl[.zstd]`.
+fn session_log_rank(path: &Path) -> Option<(u32, bool)> {
+    let name = path.file_name()?.to_str()?;
+    let zstd = name.ends_with(".zstd") || name.ends_with(".zst");
+    let base = name
+        .strip_suffix(".zstd")
+        .or_else(|| name.strip_suffix(".zst"))
+        .unwrap_or(name);
+    if base == "session.jsonl" {
+        return Some((0, zstd));
+    }
+    let ver = base
+        .strip_prefix("session.v")?
+        .strip_suffix(".jsonl")?
+        .parse()
+        .ok()?;
+    Some((ver, zstd))
+}
+
+/// One log per session directory: the highest generation, preferring zstd on a tie.
+fn choose_latest_logs(files: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut best: std::collections::HashMap<PathBuf, (u32, bool, PathBuf)> =
+        std::collections::HashMap::new();
+    for path in files {
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let Some(rank) = session_log_rank(&path) else {
+            continue;
+        };
+        let replace = match best.get(parent) {
+            None => true,
+            Some((ver, zstd, _)) => rank.0 > *ver || (rank.0 == *ver && rank.1 && !*zstd),
+        };
+        if replace {
+            best.insert(parent.to_path_buf(), (rank.0, rank.1, path));
+        }
+    }
+    let mut out: Vec<_> = best.into_values().map(|(_, _, path)| path).collect();
+    out.sort();
+    out
+}
+
+fn stored_fold_version(store: &Store, instance: &str) -> i64 {
+    store
+        .get_scan_state(source::DSH, instance, FOLD_MARKER)
+        .and_then(|s| s.extra)
+        .and_then(|extra| serde_json::from_str::<serde_json::Value>(&extra).ok())
+        .and_then(|v| v.get("fold_version").and_then(|x| x.as_i64()))
+        .unwrap_or(0)
+}
+
+fn fold_marker(instance: &str) -> PendingScanState {
+    PendingScanState {
+        source: source::DSH.to_string(),
+        instance: instance.to_string(),
+        key: FOLD_MARKER.to_string(),
+        state: ScanState {
+            offset: FOLD_VERSION,
+            mtime_ms: 0,
+            extra: Some(format!(r#"{{"fold_version":{FOLD_VERSION}}}"#)),
+        },
+    }
 }
 
 fn parse_file(
     ctx: &ScanCtx,
     path: &Path,
-) -> Option<(PathBuf, JsonlChunk, FileMeta, Vec<UsageEvent>, i64)> {
+) -> Option<(
+    PathBuf,
+    JsonlChunk,
+    FileMeta,
+    UsageFold,
+    Vec<UsageEvent>,
+    i64,
+)> {
     let key = path.to_string_lossy().to_string();
     let stored = ctx.store.get_scan_state(source::DSH, &ctx.instance, &key);
     let size = file_size(path);
-    let mut meta = match &stored {
-        Some(s) if size < s.offset => FileMeta::default(),
-        Some(s) => s
-            .extra
-            .as_deref()
-            .map(file_meta_from_extra)
-            .unwrap_or_default(),
-        None => FileMeta::default(),
+    let truncated = stored.as_ref().is_some_and(|s| size < s.offset);
+    let mut meta = if truncated {
+        FileMeta::default()
+    } else {
+        match &stored {
+            Some(s) => s
+                .extra
+                .as_deref()
+                .map(file_meta_from_extra)
+                .unwrap_or_default(),
+            None => FileMeta::default(),
+        }
+    };
+    let mut fold = if truncated {
+        UsageFold::default()
+    } else {
+        match &stored {
+            Some(s) => s.extra.as_deref().map(fold_from_extra).unwrap_or_default(),
+            None => UsageFold::default(),
+        }
     };
 
     let chunk = if is_zstd(path) {
@@ -181,19 +323,17 @@ fn parse_file(
             skipped += 1;
             continue;
         };
-        match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-            "session" => apply_session_header(&v, &mut meta),
-            "request/header" => apply_request_header(&v, &mut meta),
-            "assistant/message" => {
-                if let Some(e) = event_from_assistant(&v, &ctx.instance, &meta, &fallback_session) {
-                    events.push(e);
-                }
-            }
-            _ => {}
-        }
+        apply_entry(
+            &v,
+            &ctx.instance,
+            &mut meta,
+            &fallback_session,
+            &mut fold,
+            &mut events,
+        );
     }
 
-    Some((path.to_path_buf(), chunk, meta, events, skipped))
+    Some((path.to_path_buf(), chunk, meta, fold, events, skipped))
 }
 
 fn apply_session_header(v: &serde_json::Value, meta: &mut FileMeta) {
@@ -225,15 +365,133 @@ fn apply_request_header(v: &serde_json::Value, meta: &mut FileMeta) {
     }
 }
 
-fn event_from_assistant(
+fn apply_entry(
+    entry: &serde_json::Value,
+    instance: &str,
+    meta: &mut FileMeta,
+    fallback_session: &str,
+    fold: &mut UsageFold,
+    events: &mut Vec<UsageEvent>,
+) {
+    match entry.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "session" => apply_session_header(entry, meta),
+        "request/header" => apply_request_header(entry, meta),
+        "llm/retry-started" => note_retry(entry, fold),
+        "compaction/summary" => {
+            if let Some(event) = event_from_compaction(entry, instance, meta, fallback_session) {
+                events.push(event);
+            }
+        }
+        "assistant/message" | "assistant/attempt" => {
+            if let Some(event) = event_from_folded(entry, instance, meta, fallback_session, fold) {
+                events.push(event);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn note_retry(entry: &serde_json::Value, fold: &mut UsageFold) {
+    let data = entry.get("data");
+    let turn = data.and_then(|d| d.get("turn")).and_then(|x| x.as_i64());
+    let step = data.and_then(|d| d.get("step")).and_then(|x| x.as_i64());
+    if fold.slot_open && fold.slot_turn == turn && fold.slot_step == step {
+        fold.slot_open = false;
+    }
+}
+
+fn event_from_folded(
+    entry: &serde_json::Value,
+    instance: &str,
+    meta: &FileMeta,
+    fallback_session: &str,
+    fold: &mut UsageFold,
+) -> Option<UsageEvent> {
+    let usage = parsed_usage(usage_of(entry)?)?;
+    let seq = entry.get("seq").and_then(|x| x.as_i64())?;
+    let data = entry.get("data").unwrap_or(entry);
+    let turn = data.get("turn").and_then(|x| x.as_i64());
+    let step = data.get("step").and_then(|x| x.as_i64());
+    let same = fold.slot_open && turn.is_some() && fold.slot_turn == turn && fold.slot_step == step;
+    if same && fold.matches(&usage) {
+        return None;
+    }
+    let slot_seq = if same { fold.slot_seq } else { seq };
+    if !same {
+        fold.slot_open = true;
+        fold.slot_turn = turn;
+        fold.slot_step = step;
+        fold.slot_seq = seq;
+    }
+    fold.remember(&usage);
+    event_from_usage(
+        entry,
+        &format!("s:{slot_seq}"),
+        &usage,
+        instance,
+        meta,
+        fallback_session,
+    )
+}
+
+fn event_from_compaction(
     entry: &serde_json::Value,
     instance: &str,
     meta: &FileMeta,
     fallback_session: &str,
 ) -> Option<UsageEvent> {
-    let data = entry.get("data").unwrap_or(entry);
-    let usage = parsed_usage(data.get("usage")?)?;
+    let usage = parsed_usage(entry.get("data")?.get("usage")?)?;
     let seq = entry.get("seq").and_then(|x| x.as_i64())?;
+    event_from_usage(
+        entry,
+        &format!("c:{seq}"),
+        &usage,
+        instance,
+        meta,
+        fallback_session,
+    )
+}
+
+/// Last provider usage sample on an assistant settlement.
+///
+/// `assistant/message` prefers `data.usage`. Both message and attempt fall back
+/// to the last `usage` chunk in `data.stream`, matching dsh-token-meter.
+fn usage_of(entry: &serde_json::Value) -> Option<&serde_json::Value> {
+    let ty = entry.get("type").and_then(|t| t.as_str())?;
+    let data = entry.get("data")?;
+    if ty == "assistant/message" {
+        if let Some(usage) = data.get("usage").filter(|u| u.is_object()) {
+            return Some(usage);
+        }
+    }
+    if ty == "assistant/message" || ty == "assistant/attempt" {
+        return last_stream_usage(data.get("stream")?);
+    }
+    None
+}
+
+fn last_stream_usage(stream: &serde_json::Value) -> Option<&serde_json::Value> {
+    stream.as_array()?.iter().rev().find_map(|item| {
+        if item.get("type").and_then(|t| t.as_str()) != Some("chunk") {
+            return None;
+        }
+        let chunk = item.get("chunk")?;
+        if chunk.get("type").and_then(|t| t.as_str()) != Some("usage") {
+            return None;
+        }
+        chunk.get("usage").filter(|u| u.is_object())
+    })
+}
+
+fn event_from_usage(
+    entry: &serde_json::Value,
+    slot: &str,
+    usage: &ParsedUsage,
+    instance: &str,
+    meta: &FileMeta,
+    fallback_session: &str,
+) -> Option<UsageEvent> {
+    let data = entry.get("data").unwrap_or(entry);
     let session_id = if meta.session_id.is_empty() {
         fallback_session.to_string()
     } else {
@@ -268,7 +526,7 @@ fn event_from_assistant(
         source::DSH,
         surface::CLI,
         instance,
-        format!("{session_id}:{seq}"),
+        format!("{session_id}:{slot}"),
     );
     e.session_id = session_id;
     e.project = meta.project.clone();
@@ -326,6 +584,59 @@ fn file_meta_from_extra(extra: &str) -> FileMeta {
             provider: s.provider,
         })
         .unwrap_or_default()
+}
+
+fn fold_from_extra(extra: &str) -> UsageFold {
+    serde_json::from_str::<DshFileState>(extra)
+        .map(|s| UsageFold {
+            slot_seq: s.slot_seq,
+            slot_open: s.slot_open,
+            slot_turn: s.slot_turn,
+            slot_step: s.slot_step,
+            input: s.slot_input,
+            output: s.slot_output,
+            cache_read: s.slot_cache_read,
+            cache_write: s.slot_cache_write,
+            reasoning: s.slot_reasoning,
+        })
+        .unwrap_or_default()
+}
+
+fn file_state(meta: &FileMeta, fold: &UsageFold, line_no: i64) -> DshFileState {
+    DshFileState {
+        line_no,
+        session_id: meta.session_id.clone(),
+        project: meta.project.clone(),
+        model: meta.model.clone(),
+        provider: meta.provider.clone(),
+        slot_seq: fold.slot_seq,
+        slot_open: fold.slot_open,
+        slot_turn: fold.slot_turn,
+        slot_step: fold.slot_step,
+        slot_input: fold.input,
+        slot_output: fold.output,
+        slot_cache_read: fold.cache_read,
+        slot_cache_write: fold.cache_write,
+        slot_reasoning: fold.reasoning,
+    }
+}
+
+impl UsageFold {
+    fn matches(&self, usage: &ParsedUsage) -> bool {
+        self.input == usage.input
+            && self.output == usage.output
+            && self.cache_read == usage.cache_read
+            && self.cache_write == usage.cache_write
+            && self.reasoning == usage.reasoning
+    }
+
+    fn remember(&mut self, usage: &ParsedUsage) {
+        self.input = usage.input;
+        self.output = usage.output;
+        self.cache_read = usage.cache_read;
+        self.cache_write = usage.cache_write;
+        self.reasoning = usage.reasoning;
+    }
 }
 
 fn is_zstd(path: &Path) -> bool {
@@ -462,6 +773,37 @@ mod tests {
         serde_json::from_str(raw).unwrap()
     }
 
+    fn replay(lines: &[&str]) -> Vec<UsageEvent> {
+        replay_with(
+            FileMeta {
+                session_id: "session-abc".into(),
+                project: Some("dsh".into()),
+                ..Default::default()
+            },
+            lines,
+        )
+    }
+
+    fn replay_with(mut meta: FileMeta, lines: &[&str]) -> Vec<UsageEvent> {
+        let mut fold = UsageFold::default();
+        let mut events = Vec::new();
+        for line in lines {
+            apply_entry(
+                &usage_json(line),
+                "local",
+                &mut meta,
+                "session-abc",
+                &mut fold,
+                &mut events,
+            );
+        }
+        events
+    }
+
+    fn sum_tokens(events: &[UsageEvent]) -> i64 {
+        events.iter().map(|e| e.total_tokens()).sum()
+    }
+
     fn hex_bytes(s: &str) -> Vec<u8> {
         (0..s.len())
             .step_by(2)
@@ -488,17 +830,12 @@ mod tests {
 
     #[test]
     fn assistant_event_uses_session_and_seq() {
-        let entry = usage_json(
-            r#"{"type":"assistant/message","seq":159,"time":1786626078104,"data":{"message":{"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-flash"}},"usage":{"inputTokens":10,"outputTokens":4,"cacheReadTokens":2,"reasoningTokens":1}}}"#,
-        );
-        let meta = FileMeta {
-            session_id: "session-abc".into(),
-            project: Some("dsh".into()),
-            model: String::new(),
-            provider: String::new(),
-        };
-        let e = event_from_assistant(&entry, "local", &meta, "session-abc").unwrap();
-        assert_eq!(e.dedup_key, "session-abc:159");
+        let e = replay(&[
+            r#"{"type":"assistant/message","seq":159,"time":1786626078104,"data":{"turn":1,"step":1,"message":{"source":{"kind":"model","provider":"deepseek-official","model":"deepseek-v4-flash"}},"usage":{"inputTokens":10,"outputTokens":4,"cacheReadTokens":2,"reasoningTokens":1}}}"#,
+        ])
+        .pop()
+        .unwrap();
+        assert_eq!(e.dedup_key, "session-abc:s:159");
         assert_eq!(e.model, "deepseek-v4-flash");
         assert_eq!(e.provider.as_deref(), Some("deepseek-official"));
         assert_eq!(e.input_tokens, 10);
@@ -517,10 +854,13 @@ mod tests {
             ),
             &mut meta,
         );
-        let entry = usage_json(
-            r#"{"type":"assistant/message","seq":1,"time":1,"data":{"usage":{"inputTokens":3,"outputTokens":1}}}"#,
+        let events = replay_with(
+            meta,
+            &[
+                r#"{"type":"assistant/message","seq":1,"time":1,"data":{"turn":1,"step":1,"usage":{"inputTokens":3,"outputTokens":1}}}"#,
+            ],
         );
-        let e = event_from_assistant(&entry, "local", &meta, "s").unwrap();
+        let e = events.last().unwrap();
         assert_eq!(e.model, "deepseek-v4-flash");
         assert_eq!(e.provider.as_deref(), Some("deepseek-official"));
     }
@@ -557,10 +897,68 @@ mod tests {
             project: Some("dsh".into()),
             model: "deepseek-v4-flash".into(),
             provider: "deepseek-official".into(),
+            ..Default::default()
         })
         .unwrap();
         let meta = file_meta_from_extra(&extra);
         assert_eq!(meta.model, "deepseek-v4-flash");
         assert_eq!(line_no_from_extra(Some(&extra)), 12);
+    }
+
+    #[test]
+    fn keeps_only_the_highest_session_generation() {
+        let paths = vec![
+            PathBuf::from("root/sess/session.jsonl.zstd"),
+            PathBuf::from("root/sess/session.v3.jsonl.zstd"),
+            PathBuf::from("root/sess/session.v1.jsonl.zstd"),
+            PathBuf::from("root/other/session.jsonl"),
+            PathBuf::from("root/other/session.jsonl.zstd"),
+        ];
+        let chosen = choose_latest_logs(paths);
+        assert_eq!(chosen.len(), 2);
+        assert!(chosen.iter().any(|p| p.ends_with("session.v3.jsonl.zstd")));
+        assert!(chosen.iter().any(|p| p.ends_with("session.jsonl.zstd")));
+        assert!(!chosen.iter().any(|p| p.ends_with("session.v1.jsonl.zstd")));
+        assert!(!chosen.iter().any(|p| p.ends_with("session.jsonl")));
+    }
+
+    #[test]
+    fn same_turn_replaces_and_retry_adds() {
+        let replaced = replay(&[
+            r#"{"type":"assistant/attempt","seq":10,"time":1,"data":{"turn":1,"step":1,"stream":[{"type":"chunk","chunk":{"type":"usage","usage":{"inputTokens":100,"outputTokens":10,"cacheReadTokens":1000}}}]}}"#,
+            r#"{"type":"assistant/message","seq":11,"time":2,"data":{"turn":1,"step":1,"usage":{"inputTokens":120,"outputTokens":12,"cacheReadTokens":4000}}}"#,
+        ]);
+        assert_eq!(replaced.len(), 2);
+        assert_eq!(replaced[0].dedup_key, replaced[1].dedup_key);
+        assert_eq!(replaced[1].input_tokens, 120);
+        assert_eq!(replaced[1].cache_read_tokens, 4000);
+        assert_eq!(sum_tokens(&replaced[1..]), 120 + 12 + 4000);
+
+        let retried = replay(&[
+            r#"{"type":"assistant/attempt","seq":10,"time":1,"data":{"turn":1,"step":1,"stream":[{"type":"chunk","chunk":{"type":"usage","usage":{"inputTokens":100,"outputTokens":10}}}]}}"#,
+            r#"{"type":"llm/retry-started","seq":11,"data":{"turn":1,"step":1}}"#,
+            r#"{"type":"assistant/message","seq":12,"time":2,"data":{"turn":1,"step":1,"usage":{"inputTokens":80,"outputTokens":8}}}"#,
+        ]);
+        assert_eq!(retried.len(), 2);
+        assert_ne!(retried[0].dedup_key, retried[1].dedup_key);
+        assert_eq!(sum_tokens(&retried), 100 + 10 + 80 + 8);
+    }
+
+    #[test]
+    fn compaction_adds_without_closing_the_slot() {
+        let events = replay(&[
+            r#"{"type":"assistant/message","seq":1,"time":1,"data":{"turn":1,"step":1,"usage":{"inputTokens":10,"outputTokens":1}}}"#,
+            r#"{"type":"compaction/summary","seq":2,"time":2,"data":{"usage":{"inputTokens":5000,"outputTokens":200,"cacheReadTokens":40000}}}"#,
+            r#"{"type":"assistant/message","seq":3,"time":3,"data":{"turn":1,"step":1,"usage":{"inputTokens":12,"outputTokens":2}}}"#,
+        ]);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].dedup_key, events[2].dedup_key);
+        assert_eq!(events[1].dedup_key, "session-abc:c:2");
+        assert_eq!(events[1].cache_read_tokens, 40000);
+        // Replacement drops the first 11 tokens; compaction stays.
+        assert_eq!(
+            sum_tokens(&[events[1].clone(), events[2].clone()]),
+            5000 + 200 + 40000 + 12 + 2
+        );
     }
 }

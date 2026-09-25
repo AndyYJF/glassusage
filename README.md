@@ -19,7 +19,7 @@ proxy, intercept, or man-in-the-middle any traffic, and it never sends your data
 | OpenClaw | `~/.openclaw` databases and archives | File watcher |
 | Pi | `~/.pi/agent/sessions/**/*.jsonl` | File watcher |
 | Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` | File watcher |
-| DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd` | File watcher |
+| DeepSeek Harness | `~/.dsh/sessions/**/session.vN.jsonl.zstd` | File watcher |
 
 Remote Hermes and OpenClaw instances can be added over SSH. GlassUsage pulls a consistent
 read-only snapshot of the remote SQLite file; nothing is installed on the remote host.

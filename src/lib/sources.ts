@@ -79,7 +79,7 @@ export const SOURCE_META: Record<SourceId, SourceMeta> = {
     id: "dsh",
     label: "DeepSeek Harness",
     colorVar: "--src-dsh",
-    origin: "~/.dsh/sessions/**/session.jsonl.zstd",
+    origin: "~/.dsh/sessions/**/session.vN.jsonl.zstd",
     realtime: true,
   },
 };
