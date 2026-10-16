@@ -496,40 +496,56 @@ class AppDatabase {
     return (start.millisecondsSinceEpoch, end.millisecondsSinceEpoch);
   }
 
+  static bool _sameCost(double? a, double? b) {
+    if (a == null && b == null) return true;
+    if (a == null || b == null) return false;
+    return (a - b).abs() <= 1e-11;
+  }
+
   int reprice(PricingService pricing) {
     final rows = _db.select('''
-      SELECT source, model, model_norm, input_tokens, output_tokens,
-             cache_read_tokens, cache_write_tokens
+      SELECT id, source, model, model_norm, input_tokens, output_tokens,
+             cache_read_tokens, cache_write_tokens, cost_usd
       FROM usage_events
-      GROUP BY source, model, model_norm, input_tokens, output_tokens,
-               cache_read_tokens, cache_write_tokens
     ''');
+
+    final toUpdate = <(String, double?, int)>[];
+    for (final r in rows) {
+      final id = (r['id'] as num).toInt();
+      final source = r['source'] as String;
+      final model = r['model'] as String;
+      final oldNorm = r['model_norm'] as String;
+      final oldCost = (r['cost_usd'] as num?)?.toDouble();
+      final input = (r['input_tokens'] as num?)?.toInt() ?? 0;
+      final output = (r['output_tokens'] as num?)?.toInt() ?? 0;
+      final cr = (r['cache_read_tokens'] as num?)?.toInt() ?? 0;
+      final cw = (r['cache_write_tokens'] as num?)?.toInt() ?? 0;
+
+      final norm = pricing.normalize(model);
+      final cost = pricing.cost(norm, input, output, cr, cw);
+
+      if (sourceHasNativeCost(source) && cost == null) {
+        continue;
+      }
+      if (norm != oldNorm || !_sameCost(cost, oldCost)) {
+        toUpdate.add((norm, cost, id));
+      }
+    }
+
+    if (toUpdate.isEmpty) {
+      return 0;
+    }
 
     _db.execute('BEGIN IMMEDIATE TRANSACTION');
     final updateStmt = _db.prepare('''
       UPDATE usage_events
          SET model_norm = ?1, cost_usd = ?2
-       WHERE source = ?3 AND model = ?4
-         AND input_tokens = ?5 AND output_tokens = ?6
-         AND cache_read_tokens = ?7 AND cache_write_tokens = ?8
-         AND (model_norm != ?1 OR cost_usd IS NOT ?2)
+       WHERE id = ?3
     ''');
     var updated = 0;
     try {
-      for (final r in rows) {
-        final source = r['source'] as String;
-        final model = r['model'] as String;
-        final input = (r['input_tokens'] as num).toInt();
-        final output = (r['output_tokens'] as num).toInt();
-        final cr = (r['cache_read_tokens'] as num).toInt();
-        final cw = (r['cache_write_tokens'] as num).toInt();
-        final norm = pricing.normalize(model);
-        final cost = pricing.cost(norm, input, output, cr, cw);
-
-        if (sourceHasNativeCost(source) && cost == null) {
-          continue;
-        }
-        updateStmt.execute([norm, cost, source, model, input, output, cr, cw]);
+      for (final item in toUpdate) {
+        updateStmt.execute([item.$1, item.$2, item.$3]);
         updated += _db.updatedRows;
       }
       if (updated > 0) {

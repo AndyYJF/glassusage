@@ -126,18 +126,17 @@ class _UsageWorkerEngine {
   }
 
   void start() {
-    Future.microtask(() async {
+    // Allow initial UI hydration RPCs (getSettings, getOverview, getSourceHealth)
+    // to complete immediately (< 20ms) before running background scans & LiteLLM refresh.
+    Timer(const Duration(milliseconds: 350), () async {
+      _setupWatchers();
+      await scanAll();
+      unawaited(_syncCursorNow());
       try {
         store.reprice(pricing);
         await pricing.refresh();
         store.reprice(pricing);
       } catch (_) {}
-    });
-
-    Future.microtask(() {
-      scanAll();
-      _setupWatchers();
-      _syncCursorNow();
     });
 
     // 1 Hz live-tick timer (uses cached today totals; zero SQLite queries unless midnight rolled over)
@@ -148,12 +147,12 @@ class _UsageWorkerEngine {
 
     // 60s safety poll for local sources
     Timer.periodic(const Duration(seconds: 60), (_) {
-      scanAll();
+      unawaited(scanAll());
     });
 
     // 5-minute Cursor API poll
     Timer.periodic(const Duration(minutes: 5), (_) {
-      _syncCursorNow();
+      unawaited(_syncCursorNow());
     });
 
     // 20-second remote scheduler check
@@ -381,9 +380,10 @@ class _UsageWorkerEngine {
     }
   }
 
-  void scanAll() {
+  Future<void> scanAll() async {
     for (final collector in allCollectors()) {
       runScan(collector.id);
+      await Future<void>.delayed(Duration.zero);
     }
   }
 
@@ -608,7 +608,7 @@ class _UsageWorkerEngine {
 
       case 'rescan_all':
         _invalidateDetectCache();
-        scanAll();
+        await scanAll();
         await _syncCursorNow();
         return getSourceHealth().map((h) => h.toJson()).toList();
 
