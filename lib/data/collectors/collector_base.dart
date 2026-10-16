@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 
 import '../../domain/models/settings_model.dart';
+import '../../domain/models/output_speed.dart';
 import '../../domain/models/usage_models.dart';
 import '../database/app_database.dart';
 import '../pricing/pricing_service.dart';
@@ -46,6 +47,7 @@ class ScanReport {
   int filesSeen;
   int skipped;
   List<String> detectedPaths;
+  List<OutputSpeedSample> outputSpeeds;
 
   ScanReport({
     List<UsageEvent>? events,
@@ -53,9 +55,11 @@ class ScanReport {
     this.filesSeen = 0,
     this.skipped = 0,
     List<String>? detectedPaths,
+    List<OutputSpeedSample>? outputSpeeds,
   }) : events = events ?? [],
        states = states ?? [],
-       detectedPaths = detectedPaths ?? [];
+       detectedPaths = detectedPaths ?? [],
+       outputSpeeds = outputSpeeds ?? [];
 
   void merge(ScanReport other) {
     events.addAll(other.events);
@@ -63,6 +67,7 @@ class ScanReport {
     filesSeen += other.filesSeen;
     skipped += other.skipped;
     detectedPaths.addAll(other.detectedPaths);
+    outputSpeeds.addAll(other.outputSpeeds);
   }
 }
 

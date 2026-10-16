@@ -5,11 +5,24 @@ import 'dart:math' as math;
 import 'package:path/path.dart' as p;
 
 import '../../domain/models/settings_model.dart';
+import '../../domain/models/output_speed.dart';
 import '../../domain/models/usage_models.dart';
 import '../database/app_database.dart';
 import 'collector_base.dart';
 
 class OpenCodeCollector extends Collector {
+  static OutputSpeedSample? _outputSpeed(UsageEvent event, Map data) {
+    final time = data['time'];
+    if (time is! Map || data['error'] != null || event.outputTokens <= 0) return null;
+    final completed = parseTimestamp(time['completed']);
+    final started = parseTimestamp(time['created']);
+    if (completed == null) return null; // Never use time_updated or file mtime.
+    return OutputSpeedSample(source: event.source, instance: event.instance,
+        model: event.model, requestId: '${event.sessionId}:${event.dedupKey}',
+        outputTokens: event.outputTokens, completedAtMs: completed,
+        durationMs: started != null && completed > started ? completed - started : null,
+        scope: OutputTimingScope.response);
+  }
   @override
   String get id => SourceIds.opencode;
 
@@ -198,6 +211,8 @@ class OpenCodeCollector extends Collector {
           );
           if (!ev.isEmpty) {
             report.events.add(ev);
+            final speed = _outputSpeed(ev, v);
+            if (speed != null) report.outputSpeeds.add(speed);
           }
         }
       } else if (tableExists(conn, 'session')) {
@@ -315,6 +330,8 @@ class OpenCodeCollector extends Collector {
       );
       if (!ev.isEmpty) {
         report.events.add(ev);
+        final speed = _outputSpeed(ev, v);
+        if (speed != null) report.outputSpeeds.add(speed);
       }
     }
     report.states.add(

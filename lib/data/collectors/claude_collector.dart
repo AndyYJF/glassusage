@@ -4,9 +4,11 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../../domain/models/settings_model.dart';
+import '../../domain/models/output_speed.dart';
 import '../../domain/models/usage_models.dart';
 import '../database/app_database.dart';
 import 'collector_base.dart';
+import 'output_timing.dart';
 
 class ClaudeCollector extends Collector {
   @override
@@ -131,12 +133,23 @@ class ClaudeCollector extends Collector {
         continue;
       }
       if (chunk.lines.isEmpty) continue;
+      var timing = OutputTurnState();
+      final stored = ctx.store.getScanState(SourceIds.claude, ctx.instance, path);
+      if (stored != null && fileSize(path) >= stored.offset) {
+        try {
+          final extra = jsonDecode(stored.extra ?? 'null');
+          if (extra is Map) timing = OutputTurnState.fromJson(extra['outputTiming']);
+        } catch (_) {}
+      }
       final (events, skipped) =
-          parseClaudeLines(chunk, path, desktopIds, ctx.instance);
+          parseClaudeLines(chunk, path, desktopIds, ctx.instance,
+              timing: timing, outputSpeeds: report.outputSpeeds);
       report.events.addAll(events);
       report.skipped += skipped;
       report.states.add(
-        pendingScanState(SourceIds.claude, ctx.instance, path, chunk),
+        PendingScanState(source: SourceIds.claude, instance: ctx.instance, key: path,
+          state: ScanState(offset: chunk.newOffset, mtimeMs: chunk.mtimeMs,
+            extra: jsonEncode({'line_no': chunk.newLineNo, 'outputTiming': timing.toJson()}))),
       );
     }
 
@@ -148,12 +161,23 @@ class ClaudeCollector extends Collector {
     JsonlChunk chunk,
     String path,
     Set<String> desktopIds,
-    String instance,
-  ) {
+    String instance, {
+    OutputTurnState? timing,
+    List<OutputSpeedSample>? outputSpeeds,
+  }) {
     final stem = fileStem(path);
     final byKey = <String, UsageEvent>{};
     final order = <String>[];
     var skipped = 0;
+    final turn = timing ?? OutputTurnState();
+    int? completedAt;
+    void finishTurn(int? timestamp, {int? duration}) {
+      final samples = turn.finish(source: SourceIds.claude,
+          instance: instance, fileId: stem, completedAtMs: timestamp,
+          nativeDurationMs: duration);
+      outputSpeeds?.addAll(samples);
+      completedAt = null;
+    }
 
     for (final (_, line) in chunk.lines) {
       dynamic v;
@@ -164,6 +188,21 @@ class ClaudeCollector extends Collector {
         continue;
       }
       if (v is! Map) continue;
+      final timestamp = parseTimestamp(v['timestamp']);
+      if (v['type'] == 'user' && v['isMeta'] != true) {
+        final msg = v['message'];
+        final content = msg is Map ? msg['content'] : null;
+        final toolResult = content is List && content.any((p) => p is Map && p['type'] == 'tool_result');
+        if (!toolResult) {
+          if (completedAt != null) finishTurn(completedAt);
+          turn.start(timestamp, v['uuid'] as String? ?? '${timestamp ?? "unknown"}');
+        }
+        continue;
+      }
+      if (v['type'] == 'system' && v['subtype'] == 'turn_duration') {
+        finishTurn(timestamp, duration: v['durationMs'] is num ? (v['durationMs'] as num).toInt() : null);
+        continue;
+      }
       if (v['type'] != 'assistant') continue;
       final message = v['message'];
       if (message is! Map) continue;
@@ -192,6 +231,8 @@ class ClaudeCollector extends Collector {
         continue;
       }
       final dedupKey = '$stem:$messageId:$requestId';
+      turn.message(dedupKey, message['model'] as String? ?? 'unknown', output);
+      if (message['stop_reason'] == 'end_turn') completedAt = timestamp;
 
       final sessionId = (v['sessionId'] as String?) ??
           (v['session_id'] as String?) ??
@@ -227,6 +268,7 @@ class ClaudeCollector extends Collector {
       for (final k in order)
         if (byKey.containsKey(k)) byKey[k]!,
     ];
+    if (completedAt != null) finishTurn(completedAt);
     return (events, skipped);
   }
 }

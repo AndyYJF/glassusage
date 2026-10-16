@@ -13,6 +13,7 @@ import '../collectors/collector_base.dart';
 import '../collectors/cursor_collector.dart';
 import '../database/app_database.dart';
 import '../live/live_tracker.dart';
+import '../live/output_speed_tracker.dart';
 import '../pricing/pricing_service.dart';
 import '../remote/remote_sync.dart';
 
@@ -80,6 +81,7 @@ class _UsageWorkerEngine {
   late final PricingService pricing;
   late final SettingsStore settingsStore;
   late final LiveTracker live;
+  final outputSpeeds = OutputSpeedTracker();
 
   /// 30-second TTL cache for `collector.detect()` paths (PLAN.md §3.2 #4).
   final Map<String, (int, List<String>)> _detectCache = {};
@@ -317,6 +319,8 @@ class _UsageWorkerEngine {
     return base.copyWith(
       budgetCostToday: _cachedBudgetCostToday,
       budgetTokensToday: _cachedBudgetTokensToday,
+      outputSpeeds: outputSpeeds.snapshot()
+          .where((sample) => settingsStore.get().sourceEnabled(sample.source)).toList(),
     );
   }
 
@@ -353,6 +357,8 @@ class _UsageWorkerEngine {
         states,
       );
       live.push(outcome.deltas);
+      outputSpeeds.observe(report.outputSpeeds, source: sourceId,
+          instance: instance, isRealtime: collector.isRealtime && rootOverride == null);
       store.recordStatus(
         sourceId,
         instance,

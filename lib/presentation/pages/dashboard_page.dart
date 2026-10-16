@@ -8,6 +8,7 @@ import '../providers/app_providers.dart';
 import '../widgets/charts.dart';
 import '../widgets/glass_widgets.dart';
 import '../widgets/odometer.dart';
+import '../widgets/output_speed_card.dart';
 
 class DashboardPage extends ConsumerStatefulWidget {
   const DashboardPage({super.key});
@@ -51,6 +52,8 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
         children: [
           // 1. Live Telemetry Hero Card (isolated 1 Hz listener)
           const _LiveTelemetryBanner(),
+          const SizedBox(height: 16),
+          const OutputSpeedCard(),
           const SizedBox(height: 16),
 
           // 2. Four KPI Stat Tiles

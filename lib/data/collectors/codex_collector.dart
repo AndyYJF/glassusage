@@ -5,9 +5,11 @@ import 'dart:math' as math;
 import 'package:path/path.dart' as p;
 
 import '../../domain/models/settings_model.dart';
+import '../../domain/models/output_speed.dart';
 import '../../domain/models/usage_models.dart';
 import '../database/app_database.dart';
 import 'collector_base.dart';
+import 'output_timing.dart';
 
 class CumulativeTokens {
   final int input;
@@ -78,6 +80,7 @@ class CodexState {
   String provider;
   String sessionId;
   String? project;
+  OutputTurnState outputTiming;
 
   CodexState({
     this.offset = 0,
@@ -87,7 +90,8 @@ class CodexState {
     this.provider = '',
     this.sessionId = '',
     this.project,
-  });
+    OutputTurnState? outputTiming,
+  }) : outputTiming = outputTiming ?? OutputTurnState();
 
   Map<String, dynamic> toJson() => {
         'offset': offset,
@@ -97,6 +101,7 @@ class CodexState {
         'provider': provider,
         'session_id': sessionId,
         'project': project,
+        'outputTiming': outputTiming.toJson(),
       };
 
   factory CodexState.fromJson(Map<String, dynamic> json) {
@@ -111,6 +116,7 @@ class CodexState {
       provider: json['provider'] as String? ?? '',
       sessionId: json['session_id'] as String? ?? '',
       project: json['project'] as String?,
+      outputTiming: OutputTurnState.fromJson(json['outputTiming']),
     );
   }
 }
@@ -158,7 +164,7 @@ class CodexCollector extends Collector {
     );
 
     for (final path in files) {
-      final res = parseCodexFile(ctx, path);
+      final res = parseCodexFile(ctx, path, outputSpeeds: report.outputSpeeds);
       if (res == null) continue;
       final (state, events, skipped) = res;
       report.events.addAll(events);
@@ -183,8 +189,9 @@ class CodexCollector extends Collector {
 
   static (CodexState, List<UsageEvent>, int)? parseCodexFile(
     ScanCtx ctx,
-    String path,
-  ) {
+    String path, {
+    List<OutputSpeedSample>? outputSpeeds,
+  }) {
     final stored = ctx.store.getScanState(SourceIds.codex, ctx.instance, path);
     final size = fileSize(path);
 
@@ -246,7 +253,27 @@ class CodexCollector extends Collector {
         case 'event_msg':
           if (payload is! Map) continue;
           final ptype = payload['type'] as String? ?? '';
-          if (ptype == 'thread_settings_applied') {
+          final rawTurnId = payload['turn_id'];
+          final turnId = rawTurnId is String ? rawTurnId : null;
+          if (ptype == 'task_started') {
+            state.outputTiming.start(
+              parseTimestamp(payload['started_at']) ?? parseTimestamp(v['timestamp']),
+              turnId ?? '$lineNo',
+            );
+          } else if (ptype == 'task_complete') {
+            if (state.outputTiming.turnId.isEmpty || turnId == null || turnId == state.outputTiming.turnId) {
+              if (state.outputTiming.turnId.isEmpty) state.outputTiming.turnId = turnId ?? '$lineNo';
+              final samples = state.outputTiming.finish(
+                source: SourceIds.codex, instance: ctx.instance, fileId: stem,
+                completedAtMs: parseTimestamp(payload['completed_at']) ?? parseTimestamp(v['timestamp']),
+                nativeDurationMs: payload['duration_ms'] is num
+                    ? (payload['duration_ms'] as num).toInt() : null,
+              );
+              outputSpeeds?.addAll(samples);
+            }
+          } else if (ptype == 'turn_aborted') {
+            if (turnId == null || turnId == state.outputTiming.turnId) state.outputTiming.clear();
+          } else if (ptype == 'thread_settings_applied') {
             final ts = payload['thread_settings'];
             if (ts is Map) {
               final m = ts['model'] as String?;
@@ -266,6 +293,7 @@ class CodexCollector extends Collector {
                   CumulativeTokens.fromJson(Map<String, dynamic>.from(total));
               if (cum.sum < state.prev.sum) {
                 state.prev = cum;
+                state.outputTiming.valid = false;
                 continue;
               }
               delta = cum.delta(state.prev);
@@ -280,6 +308,7 @@ class CodexCollector extends Collector {
               }
             }
             if (delta.isZero) continue;
+            state.outputTiming.add(state.model.isEmpty ? 'unknown' : state.model, delta.output);
 
             events.add(
               UsageEvent(

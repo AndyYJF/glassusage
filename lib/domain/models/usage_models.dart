@@ -1,6 +1,8 @@
 /// Normalized domain models shared across collectors, SQLite store, background Isolate, and UI.
 library;
 
+import 'output_speed.dart';
+
 class SourceIds {
   static const String claude = 'claude';
   static const String codex = 'codex';
@@ -739,6 +741,7 @@ class LiveRates {
   final List<int> spark60;
   final double budgetCostToday;
   final int budgetTokensToday;
+  final List<OutputSpeedSample> outputSpeeds;
 
   const LiveRates({
     this.rpm = 0.0,
@@ -749,6 +752,7 @@ class LiveRates {
     this.spark60 = const [],
     this.budgetCostToday = 0.0,
     this.budgetTokensToday = 0,
+    this.outputSpeeds = const [],
   });
 
   LiveRates copyWith({
@@ -760,6 +764,7 @@ class LiveRates {
     List<int>? spark60,
     double? budgetCostToday,
     int? budgetTokensToday,
+    List<OutputSpeedSample>? outputSpeeds,
   }) {
     return LiveRates(
       rpm: rpm ?? this.rpm,
@@ -770,6 +775,7 @@ class LiveRates {
       spark60: spark60 ?? this.spark60,
       budgetCostToday: budgetCostToday ?? this.budgetCostToday,
       budgetTokensToday: budgetTokensToday ?? this.budgetTokensToday,
+      outputSpeeds: outputSpeeds ?? this.outputSpeeds,
     );
   }
 
@@ -782,6 +788,7 @@ class LiveRates {
     'spark60': spark60,
     'budgetCostToday': budgetCostToday,
     'budgetTokensToday': budgetTokensToday,
+    'outputSpeeds': outputSpeeds.map((sample) => sample.toJson()).toList(),
   };
 
   factory LiveRates.fromJson(Map<String, dynamic> json) => LiveRates(
@@ -799,6 +806,8 @@ class LiveRates {
             .toList(),
     budgetCostToday: (json['budgetCostToday'] as num?)?.toDouble() ?? 0.0,
     budgetTokensToday: (json['budgetTokensToday'] as num?)?.toInt() ?? 0,
+    outputSpeeds: (json['outputSpeeds'] as List? ?? const [])
+        .map((e) => OutputSpeedSample.fromJson((e as Map).cast<String, dynamic>())).toList(),
   );
 }
 
