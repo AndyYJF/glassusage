@@ -1,7 +1,8 @@
 !include "MUI2.nsh"
+!include "WordFunc.nsh"
 
 !ifndef APP_VERSION
-  !define APP_VERSION "0.7.0"
+  !define APP_VERSION "0.7.1"
 !endif
 !ifndef BUILD_DIR
   !define BUILD_DIR "..\..\build\windows\x64\runner\Release"
@@ -34,12 +35,41 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
+Function .onInit
+  ; Preserve existing install directory from legacy 0.6.x or previous 0.7.x install
+  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\GlassUsage" "InstallLocation"
+  StrCmp $0 "" check_cmdline
+  ; Strip surrounding double quotes if present (e.g. "C:\App\GlassUsage")
+  StrCpy $1 $0 1
+  StrCmp $1 '"' 0 apply_dir
+  StrCpy $0 $0 "" 1
+  StrCpy $1 $0 1 -1
+  StrCmp $1 '"' 0 apply_dir
+  StrCpy $0 $0 -1
+  apply_dir:
+  StrCmp $0 "" check_cmdline
+  StrCpy $INSTDIR $0
+
+  check_cmdline:
+  ; Support /P (passive mode used by Tauri updater and in-app updater)
+  ${WordFind} "$CMDLINE" "/P" "E+1{" $R0
+  IfErrors 0 set_passive
+  ${WordFind} "$CMDLINE" "/passive" "E+1{" $R0
+  IfErrors 0 set_passive
+  Goto done_init
+  set_passive:
+  SetSilent silent
+  done_init:
+FunctionEnd
+
 Section "GlassUsage" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
 
-  ; Stop running instance gracefully before overwriting binaries
+  ; Give exiting instance a moment to close, then ensure glassusage.exe is stopped
+  Sleep 500
   nsExec::ExecToLog 'taskkill /F /IM glassusage.exe'
+  Sleep 400
 
   File /r "${BUILD_DIR}\*.*"
 
@@ -54,6 +84,7 @@ Section "GlassUsage" SecMain
 
   ; Windows Add/Remove Programs Registration
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\GlassUsage" "DisplayName" "GlassUsage"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\GlassUsage" "MainBinaryName" "glassusage.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\GlassUsage" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\GlassUsage" "Publisher" "GlassUsage"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\GlassUsage" "DisplayIcon" "$INSTDIR\glassusage.exe"
@@ -62,6 +93,12 @@ Section "GlassUsage" SecMain
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\GlassUsage" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\GlassUsage" "NoRepair" 1
 SectionEnd
+
+Function .onInstSuccess
+  ; When invoked via in-app updater (/P or /S), automatically relaunch GlassUsage
+  IfSilent 0 +2
+  Exec '"$INSTDIR\glassusage.exe"'
+FunctionEnd
 
 Section "Uninstall"
   nsExec::ExecToLog 'taskkill /F /IM glassusage.exe'
@@ -76,6 +113,7 @@ Section "Uninstall"
   Delete "$INSTDIR\*.dll"
   Delete "$INSTDIR\glassusage.exe"
   Delete "$INSTDIR\Uninstall.exe"
+  Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\GlassUsage"

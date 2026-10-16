@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Optional release tag matching pubspec.yaml version (e.g. v0.7.0)"
+        description: "Optional release tag matching pubspec.yaml version (e.g. v0.7.1)"
         required: false
         type: string
 
@@ -81,11 +81,15 @@ jobs:
           flutter test
           flutter build windows --release
 
-      - name: Package Portable ZIP, NSIS Installer & SHA256 Checksums
+      - name: Package Portable ZIP, Signed NSIS Installer, latest.json & SHA256 Checksums
         if: steps.meta.outputs.should_release == 'true'
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           $version = "${{ steps.meta.outputs.app_version }}"
+          $tag = "${{ steps.meta.outputs.release_tag }}"
           $releaseDir = "build/windows/x64/runner/Release"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
 
@@ -113,10 +117,44 @@ jobs:
             throw "NSIS installer build failed with exit code $LASTEXITCODE"
           }
 
-          # 3. SHA256SUMS.txt
+          # 3. Sign NSIS Installer with Minisign & generate latest.json for in-app updater
+          $sigBase64 = ""
+          if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            npx --yes @tauri-apps/cli@2 signer sign "$setupPath"
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$setupPath.sig")) {
+              throw "Failed to sign installer with TAURI_SIGNING_PRIVATE_KEY"
+            }
+            $sigRaw = (Get-Content -Raw "$setupPath.sig").Trim()
+            if ($sigRaw.StartsWith("untrusted comment:")) {
+              $sigBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($sigRaw))
+            } else {
+              $sigBase64 = $sigRaw
+            }
+          }
+
+          $downloadUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$setupName"
+          $latestObj = [ordered]@{
+            version   = $version
+            notes     = "GlassUsage $tag (Pure Flutter Windows) — Liquid Glass UI anti-jank rewrite, background Isolate SQLite engine, and full 10-agent support."
+            pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = $sigBase64
+                url       = $downloadUrl
+              }
+              "windows-x86_64-nsis" = [ordered]@{
+                signature = $sigBase64
+                url       = $downloadUrl
+              }
+            }
+          }
+          $latestPath = Join-Path "dist" "latest.json"
+          $latestObj | ConvertTo-Json -Depth 6 | Set-Content -Path $latestPath -Encoding utf8
+
+          # 4. SHA256SUMS.txt
           $sumsPath = Join-Path "dist" "SHA256SUMS.txt"
           $lines = @()
-          Get-ChildItem -Path "dist" -Filter "GlassUsage_*" | ForEach-Object {
+          Get-ChildItem -Path "dist" -Filter "GlassUsage_*" | Where-Object { $_.Extension -ne ".sig" } | ForEach-Object {
             $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             $lines += "$hash  $($_.Name)"
           }
@@ -152,10 +190,13 @@ jobs:
             ## GlassUsage ${{ steps.meta.outputs.release_tag }} (Pure Flutter Windows)
 
             ### Install / Upgrade
+            - **In-App Update**: Click **Settings → Updates → Check for updates** in existing `0.6.x` or `0.7.x` installations to upgrade in-place automatically.
             - **Installer (`GlassUsage_${{ steps.meta.outputs.app_version }}_x64-setup.exe`)**: Standard Windows NSIS installer with Start Menu & Desktop shortcuts. Existing user data in `%APPDATA%\com.glassusage.app` and legacy `%APPDATA%\com.glassusage.desktop` is preserved and automatically migrated on first launch.
             - **Portable (`GlassUsage_${{ steps.meta.outputs.app_version }}_windows_x64_portable.zip`)**: Extract and run `glassusage.exe` directly (no WebView2 runtime required).
             - **Checksums (`SHA256SUMS.txt`)**: SHA-256 hashes for release verification.
           files: |
             dist/GlassUsage_${{ steps.meta.outputs.app_version }}_x64-setup.exe
+            dist/GlassUsage_${{ steps.meta.outputs.app_version }}_x64-setup.exe.sig
             dist/GlassUsage_${{ steps.meta.outputs.app_version }}_windows_x64_portable.zip
+            dist/latest.json
             dist/SHA256SUMS.txt

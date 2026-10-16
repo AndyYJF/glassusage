@@ -268,6 +268,16 @@ class AppI18n {
     'settings.refreshPricing': 'Refresh from LiteLLM',
     'settings.addOverride': 'Add Price Override',
     'settings.openDataDir': 'Open Data Folder',
+    'settings.updates': 'Updates',
+    'settings.updatesHint': 'Check GitHub Releases for a signed new version.',
+    'settings.currentVersion': 'Current version {version}',
+    'settings.checkUpdate': 'Check for updates',
+    'settings.checkingUpdate': 'Checking...',
+    'settings.upToDate': 'GlassUsage {version} is up to date.',
+    'settings.updateAvailable': 'New version {version} available',
+    'settings.installUpdate': 'Install & Relaunch',
+    'settings.downloadingUpdate': 'Downloading update...',
+    'settings.updateError': 'Update failed: {error}',
   };
 
   static const Map<String, String> _zh = {
@@ -359,6 +369,7 @@ class AppI18n {
 
     // Compare
     'compare.title': '多智能体横评对比',
+    'usage.colCostPer1m': '百万均价',
     'compare.subtitle': '对比各工具 Token 成本效率、缓存复用率与模型分布',
     'compare.byProvider': '按供应商',
     'compare.byProject': '按项目',
@@ -410,5 +421,15 @@ class AppI18n {
     'settings.refreshPricing': '从 LiteLLM 更新价格表',
     'settings.addOverride': '添加自定义价格',
     'settings.openDataDir': '打开数据目录',
+    'settings.updates': '更新',
+    'settings.updatesHint': '从 GitHub Releases 检查已签名的新版本。',
+    'settings.currentVersion': '当前版本 {version}',
+    'settings.checkUpdate': '检查更新',
+    'settings.checkingUpdate': '正在检查...',
+    'settings.upToDate': '当前已是最新版本 ({version})。',
+    'settings.updateAvailable': '发现新版本 {version}',
+    'settings.installUpdate': '安装更新并重启',
+    'settings.downloadingUpdate': '正在下载更新包...',
+    'settings.updateError': '更新失败：{error}',
   };
 }

@@ -1,7 +1,13 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:path/path.dart' as p;
 
 import '../../core/format/app_format.dart';
+import '../../core/i18n/app_i18n.dart';
 import '../../core/theme/glass_theme.dart';
 import '../../core/window/win32_bridge.dart';
 import '../../data/pricing/pricing_service.dart';
@@ -9,6 +15,8 @@ import '../../domain/models/settings_model.dart';
 import '../../domain/models/usage_models.dart';
 import '../providers/app_providers.dart';
 import '../widgets/glass_widgets.dart';
+
+const String kAppVersion = '0.7.1';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
@@ -576,6 +584,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               ],
             ),
           ),
+          const SizedBox(height: 16),
+
+          // 6. In-App Updates
+          _UpdateCheckerCard(i18n: i18n),
         ],
       ),
     );
@@ -968,6 +980,300 @@ class _SmallInput extends StatelessWidget {
             borderSide: BorderSide(color: g.accentBlue),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _UpdateCheckerCard extends StatefulWidget {
+  const _UpdateCheckerCard({required this.i18n});
+
+  final AppI18n i18n;
+
+  @override
+  State<_UpdateCheckerCard> createState() => _UpdateCheckerCardState();
+}
+
+class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
+  String _state = 'idle'; // idle | checking | upToDate | available | downloading | error
+  String? _remoteVersion;
+  String? _releaseNotes;
+  String? _downloadUrl;
+  String? _errorMsg;
+  double _progress = 0.0;
+
+  static int _compareSemver(String a, String b) {
+    final pa = a.replaceFirst(RegExp(r'^v'), '').split('+').first.split('.');
+    final pb = b.replaceFirst(RegExp(r'^v'), '').split('+').first.split('.');
+    for (var i = 0; i < 3; i++) {
+      final na = i < pa.length ? (int.tryParse(pa[i]) ?? 0) : 0;
+      final nb = i < pb.length ? (int.tryParse(pb[i]) ?? 0) : 0;
+      if (na != nb) return na.compareTo(nb);
+    }
+    return 0;
+  }
+
+  Future<void> _checkForUpdates() async {
+    setState(() {
+      _state = 'checking';
+      _errorMsg = null;
+    });
+    try {
+      final resp = await http
+          .get(
+            Uri.parse(
+              'https://github.com/AndyYJF/glassusage/releases/latest/download/latest.json',
+            ),
+            headers: const {'Accept': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 15));
+
+      String? version;
+      String? notes;
+      String? installerUrl;
+
+      if (resp.statusCode == 200) {
+        final json = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+        version = (json['version'] as String?)?.trim();
+        notes = json['notes'] as String?;
+        final platforms = json['platforms'] as Map<String, dynamic>?;
+        final winEntry = (platforms?['windows-x86_64-nsis'] ??
+            platforms?['windows-x86_64']) as Map<String, dynamic>?;
+        installerUrl = winEntry?['url'] as String?;
+      } else {
+        // Fallback to GitHub Releases REST API
+        final ghResp = await http
+            .get(
+              Uri.parse(
+                'https://api.github.com/repos/AndyYJF/glassusage/releases/latest',
+              ),
+              headers: const {'Accept': 'application/vnd.github+json'},
+            )
+            .timeout(const Duration(seconds: 15));
+        if (ghResp.statusCode != 200) {
+          throw Exception('HTTP ${ghResp.statusCode}');
+        }
+        final ghJson =
+            jsonDecode(utf8.decode(ghResp.bodyBytes)) as Map<String, dynamic>;
+        version = (ghJson['tag_name'] as String?)?.replaceFirst(RegExp(r'^v'), '');
+        notes = ghJson['body'] as String?;
+        final assets = (ghJson['assets'] as List<dynamic>? ?? const []);
+        for (final asset in assets) {
+          if (asset is Map<String, dynamic>) {
+            final name = asset['name'] as String? ?? '';
+            if (name.endsWith('-setup.exe')) {
+              installerUrl = asset['browser_download_url'] as String?;
+              break;
+            }
+          }
+        }
+      }
+
+      if (version == null || version.isEmpty) {
+        throw Exception('Invalid release metadata');
+      }
+
+      if (!mounted) return;
+      if (_compareSemver(version, kAppVersion) > 0 && installerUrl != null) {
+        setState(() {
+          _state = 'available';
+          _remoteVersion = version;
+          _releaseNotes = notes;
+          _downloadUrl = installerUrl;
+        });
+      } else {
+        setState(() {
+          _state = 'upToDate';
+          _remoteVersion = kAppVersion;
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _state = 'error';
+        _errorMsg = e.toString();
+      });
+    }
+  }
+
+  Future<void> _downloadAndInstall() async {
+    final url = _downloadUrl;
+    final ver = _remoteVersion ?? 'latest';
+    if (url == null) return;
+
+    setState(() {
+      _state = 'downloading';
+      _progress = 0.0;
+      _errorMsg = null;
+    });
+
+    final client = http.Client();
+    try {
+      final req = http.Request('GET', Uri.parse(url));
+      final streamed =
+          await client.send(req).timeout(const Duration(minutes: 5));
+      if (streamed.statusCode != 200) {
+        throw Exception('Download HTTP ${streamed.statusCode}');
+      }
+
+      final total = streamed.contentLength ?? 0;
+      var received = 0;
+      final outPath =
+          p.join(Directory.systemTemp.path, 'GlassUsage_${ver}_x64-setup.exe');
+      final outFile = File(outPath);
+      final sink = outFile.openWrite();
+
+      await for (final chunk in streamed.stream) {
+        sink.add(chunk);
+        received += chunk.length;
+        if (total > 0 && mounted) {
+          setState(() {
+            _progress = (received / total).clamp(0.0, 1.0);
+          });
+        }
+      }
+      await sink.flush();
+      await sink.close();
+
+      // Launch NSIS installer in passive + auto-relaunch mode and exit current instance
+      await Process.start(
+        outFile.path,
+        const ['/P', '/R'],
+        mode: ProcessStartMode.detached,
+      );
+      exit(0);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _state = 'error';
+        _errorMsg = e.toString();
+      });
+    } finally {
+      client.close();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final g = GlassTheme.of(context);
+    final i18n = widget.i18n;
+
+    return GlassCard(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _SectionHeader(
+            title: i18n.t('settings.updates'),
+            icon: Icons.sync_rounded,
+          ),
+          const SizedBox(height: 10),
+          Text(
+            i18n.t('settings.updatesHint'),
+            style: TextStyle(fontSize: 12, color: g.textSecondary),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            i18n.t('settings.currentVersion', {'version': kAppVersion}),
+            style: GlassTheme.tabularStyle(
+              fontSize: 12,
+              color: g.textTertiary,
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (_state == 'upToDate')
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(
+                i18n.t('settings.upToDate', {'version': kAppVersion}),
+                style: TextStyle(fontSize: 12.5, color: g.success),
+              ),
+            ),
+          if (_state == 'error' && _errorMsg != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(
+                _errorMsg!,
+                style: TextStyle(fontSize: 12.5, color: g.danger),
+              ),
+            ),
+          if (_state == 'available')
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: g.glassSurface,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: g.glassBorder),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    i18n.t(
+                      'settings.updateAvailable',
+                      {'version': _remoteVersion ?? ''},
+                    ),
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: g.textPrimary,
+                    ),
+                  ),
+                  if (_releaseNotes != null && _releaseNotes!.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      _releaseNotes!,
+                      maxLines: 6,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11.5, color: g.textSecondary),
+                    ),
+                  ],
+                  const SizedBox(height: 10),
+                  GlassButton(
+                    label: i18n.t('settings.installUpdate'),
+                    icon: Icons.system_update_alt_rounded,
+                    variant: GlassButtonVariant.primary,
+                    compact: true,
+                    onPressed: _downloadAndInstall,
+                  ),
+                ],
+              ),
+            ),
+          if (_state == 'downloading')
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${i18n.t('settings.downloadingUpdate')} ${(100 * _progress).round()}%',
+                    style: TextStyle(fontSize: 12, color: g.textSecondary),
+                  ),
+                  const SizedBox(height: 6),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: _progress > 0 ? _progress : null,
+                      minHeight: 6,
+                      backgroundColor: g.glassSurface,
+                      color: g.accentBlue,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          GlassButton(
+            label: _state == 'checking'
+                ? i18n.t('settings.checkingUpdate')
+                : i18n.t('settings.checkUpdate'),
+            icon: Icons.refresh_rounded,
+            onPressed: (_state == 'checking' || _state == 'downloading')
+                ? null
+                : _checkForUpdates,
+          ),
+        ],
       ),
     );
   }
