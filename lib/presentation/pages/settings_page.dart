@@ -16,7 +16,7 @@ import '../../domain/models/usage_models.dart';
 import '../providers/app_providers.dart';
 import '../widgets/glass_widgets.dart';
 
-const String kAppVersion = '0.7.1';
+const String kAppVersion = '0.7.2';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});

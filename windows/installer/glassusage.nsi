@@ -2,7 +2,7 @@
 !include "WordFunc.nsh"
 
 !ifndef APP_VERSION
-  !define APP_VERSION "0.7.1"
+  !define APP_VERSION "0.7.2"
 !endif
 !ifndef BUILD_DIR
   !define BUILD_DIR "..\..\build\windows\x64\runner\Release"

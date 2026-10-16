@@ -27,6 +27,12 @@ class AppDatabase {
   factory AppDatabase.open(String dataDir) {
     Directory(dataDir).createSync(recursive: true);
     final dbPath = p.join(dataDir, 'usage.db');
+    final bakPath = p.join(dataDir, 'usage.db.pre-flutter.bak');
+    if (File(dbPath).existsSync() && !File(bakPath).existsSync()) {
+      try {
+        File(dbPath).copySync(bakPath);
+      } catch (_) {}
+    }
     final db = sqlite3.open(dbPath);
     final store = AppDatabase._(db, dataDir);
     store._init();
@@ -189,14 +195,35 @@ class AppDatabase {
     }
 
     final rollupCols = _db.select('PRAGMA table_info(daily_rollup)');
+    final hasInstance = rollupCols.any((r) => r['name'] == 'instance');
     final hasUnpriced = rollupCols.any((r) => r['name'] == 'unpriced_events');
-    if (!hasUnpriced) {
-      try {
-        _db.execute(
-          'ALTER TABLE daily_rollup ADD COLUMN unpriced_events INTEGER NOT NULL DEFAULT 0',
+    if (!hasInstance || !hasUnpriced) {
+      _db.execute('DROP TABLE IF EXISTS daily_rollup');
+      _db.execute('''
+        CREATE TABLE daily_rollup (
+          day                TEXT NOT NULL,
+          source             TEXT NOT NULL,
+          instance           TEXT NOT NULL DEFAULT 'local',
+          model_norm         TEXT NOT NULL,
+          input_tokens       INTEGER NOT NULL DEFAULT 0,
+          output_tokens      INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+          reasoning_tokens   INTEGER NOT NULL DEFAULT 0,
+          cost_usd           REAL    NOT NULL DEFAULT 0,
+          events             INTEGER NOT NULL DEFAULT 0,
+          unpriced_events    INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (day, source, instance, model_norm)
         );
-      } catch (_) {}
+      ''');
     }
+
+    _db.execute('''
+      UPDATE source_status
+         SET last_error = NULL
+       WHERE last_error LIKE '%daily_rollup%'
+          OR last_error LIKE '%no such column: instance%'
+    ''');
 
     _db.execute(
       "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
@@ -1028,12 +1055,12 @@ class AppDatabase {
         model: r['model'] as String,
         modelNorm: r['model_norm'] as String,
         project: r['project'] as String?,
-        sessionId: r['session_id'] as String,
-        inputTokens: (r['input_tokens'] as num).toInt(),
-        outputTokens: (r['output_tokens'] as num).toInt(),
-        cacheReadTokens: (r['cache_read_tokens'] as num).toInt(),
-        cacheWriteTokens: (r['cache_write_tokens'] as num).toInt(),
-        reasoningTokens: (r['reasoning_tokens'] as num).toInt(),
+        sessionId: (r['session_id'] as String?) ?? '',
+        inputTokens: (r['input_tokens'] as num?)?.toInt() ?? 0,
+        outputTokens: (r['output_tokens'] as num?)?.toInt() ?? 0,
+        cacheReadTokens: (r['cache_read_tokens'] as num?)?.toInt() ?? 0,
+        cacheWriteTokens: (r['cache_write_tokens'] as num?)?.toInt() ?? 0,
+        reasoningTokens: (r['reasoning_tokens'] as num?)?.toInt() ?? 0,
         costUsd: cost,
         unpriced: cost == null,
       );
@@ -1258,7 +1285,7 @@ class AppDatabase {
         '$ts,$iso,${_csvEscape(r['source'] as String)},${_csvEscape(r['surface'] as String)},'
         '${_csvEscape(r['instance'] as String)},${_csvEscape(r['prov'] as String)},'
         '${_csvEscape(r['model'] as String)},${_csvEscape(r['model_norm'] as String)},'
-        '${_csvEscape(r['proj'] as String)},${_csvEscape(r['session_id'] as String)},'
+        '${_csvEscape(r['proj'] as String)},${_csvEscape((r['session_id'] as String?) ?? '')},'
         '${r['input_tokens']},${r['output_tokens']},${r['cache_read_tokens']},'
         '${r['cache_write_tokens']},${r['reasoning_tokens']},$costCell',
       );

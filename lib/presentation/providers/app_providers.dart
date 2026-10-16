@@ -85,7 +85,7 @@ String _resolveDefaultDataDir() {
   final appData = Platform.environment['APPDATA'] ??
       Platform.environment['LOCALAPPDATA'] ??
       Directory.systemTemp.path;
-  final dir = Directory(p.join(appData, 'com.glassusage.app'));
+  final dir = Directory(p.join(appData, 'com.glassusage.desktop'));
   if (!dir.existsSync()) {
     dir.createSync(recursive: true);
   }
