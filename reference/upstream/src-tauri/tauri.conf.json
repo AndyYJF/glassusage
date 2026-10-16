@@ -1,0 +1,78 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GlassUsage",
+  "version": "0.6.3",
+  "identifier": "com.glassusage.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://github.com https://objects.githubusercontent.com https://release-assets.githubusercontent.com https://api.github.com"
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "GlassUsage",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 960,
+        "minHeight": 620,
+        "transparent": true,
+        "decorations": false,
+        "shadow": true,
+        "center": true,
+        "resizable": true,
+        "dragDropEnabled": false,
+        "windowEffects": null
+      },
+      {
+        "label": "widget",
+        "title": "GlassUsage Mini",
+        "url": "widget.html",
+        "width": 360,
+        "height": 168,
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "dragDropEnabled": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": ["nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
+    "copyright": "GlassUsage",
+    "category": "DeveloperTool",
+    "shortDescription": "Token usage monitor for local AI agents",
+    "longDescription": "Real-time monitoring of token usage across Claude Code, Codex, Cursor, Antigravity, OpenCode, Hermes, OpenClaw, Pi, Kimi Code and DeepSeek Harness, with an Apple Liquid Glass interface.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English", "SimpChinese"],
+        "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE4MDMxMTExRTQ4NjAzMDQKUldRRUE0YmtFUkVER0FzSzFGbTkwL21WUGtoYlVtNzFSWi9TSlNZUndDeTNkcmNudDhhK1pvVncK",
+      "endpoints": [
+        "https://github.com/AndyYJF/glassusage/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

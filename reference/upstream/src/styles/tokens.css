@@ -1,0 +1,80 @@
+/* Design tokens. Dark is the default because the window is transparent over a desktop
+   wallpaper, where a dark tint keeps text legible against arbitrary backgrounds. */
+
+:root {
+  --accent: 10 132 255;
+  --accent-2: 175 82 222;
+  --success: 48 209 88;
+  --warning: 255 214 10;
+  --danger: 255 69 58;
+  --info: 100 210 255;
+
+  /* Per-source colours, used consistently by tiles, charts and legends. */
+  --src-claude: 217 119 87;
+  --src-codex: 118 208 174;
+  --src-cursor: 138 143 255;
+  --src-antigravity: 236 141 200;
+  --src-opencode: 255 176 82;
+  --src-hermes: 120 190 255;
+  --src-openclaw: 190 150 255;
+  --src-pi: 94 184 138;
+  --src-kimi: 232 96 80;
+  --src-dsh: 77 163 255;
+
+  --radius-card: 24px;
+  --radius-button: 12px;
+  --radius-pill: 999px;
+
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* Refraction strength, driven by the Settings slider. 0 disables the lens entirely. */
+  --lens-strength: 1;
+}
+
+:root,
+.dark {
+  color-scheme: dark;
+
+  --glass-tint: 255 255 255 / 0.07;
+  --glass-tint-2: 255 255 255 / 0.045;
+  --glass-border: 255 255 255 / 0.18;
+  --glass-border-soft: 255 255 255 / 0.1;
+
+  --hi-top: 255 255 255 / 0.45;
+  --hi-bottom: 255 255 255 / 0.12;
+  --hi-side: 255 255 255 / 0.1;
+  --shadow-drop: 0 20px 50px rgb(0 0 0 / 0.35);
+  --shadow-drop-sm: 0 8px 24px rgb(0 0 0 / 0.28);
+
+  --text: 245 246 252;
+  --text-dim: 245 246 252 / 0.66;
+  --text-faint: 245 246 252 / 0.4;
+
+  --backdrop-fallback: linear-gradient(140deg, #0b0d1a 0%, #131635 45%, #1d1430 100%);
+  --track: 0 0 0 / 0.18;
+  --track-hi: 255 255 255 / 0.25;
+}
+
+.light {
+  color-scheme: light;
+
+  --glass-tint: 255 255 255 / 0.45;
+  --glass-tint-2: 255 255 255 / 0.32;
+  --glass-border: 255 255 255 / 0.6;
+  --glass-border-soft: 255 255 255 / 0.4;
+
+  --hi-top: 255 255 255 / 0.9;
+  --hi-bottom: 255 255 255 / 0.35;
+  --hi-side: 255 255 255 / 0.4;
+  --shadow-drop: 0 20px 45px rgb(31 38 78 / 0.18);
+  --shadow-drop-sm: 0 8px 22px rgb(31 38 78 / 0.14);
+
+  --text: 22 26 45;
+  --text-dim: 22 26 45 / 0.66;
+  --text-faint: 22 26 45 / 0.42;
+
+  --backdrop-fallback: linear-gradient(140deg, #eef1fb 0%, #e6ecff 45%, #f4ecff 100%);
+  --track: 22 26 45 / 0.12;
+  --track-hi: 255 255 255 / 0.7;
+}
