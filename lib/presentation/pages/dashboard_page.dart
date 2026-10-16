@@ -365,6 +365,32 @@ class _LiveTelemetryBanner extends ConsumerWidget {
     final g = GlassTheme.of(context);
     final i18n = ref.watch(i18nProvider);
     final live = ref.watch(liveRatesProvider);
+    final preset = ref.watch(selectedRangeProvider);
+    final range = ref.watch(
+      overviewStatsProvider.select((stats) => stats?.range),
+    );
+    final periodKey = switch (preset) {
+      RangePreset.today => 'range.today',
+      RangePreset.d7 => 'range.7d',
+      RangePreset.d14 => 'range.14d',
+      RangePreset.d30 => 'range.30d',
+      RangePreset.d90 => 'range.90d',
+      RangePreset.all => 'range.all',
+    };
+    final periodLabel =
+        preset == RangePreset.today
+            ? i18n.t('dash.tokensToday')
+            : preset == RangePreset.all
+            ? i18n.t('dash.tokensAllTime')
+            : i18n.t('dash.tokensPeriod', {'period': i18n.t(periodKey)});
+    // Only today's cumulative figures come from the 1 Hz live feed. Other
+    // periods must use the same selected-range totals as the overview below.
+    final periodTotal =
+        preset == RangePreset.today
+            ? '${fmtTokens(live.tokensToday)} · ${fmtUsd(live.costToday)}'
+            : range == null
+            ? '—'
+            : '${fmtTokens(range.totalTokens)} · ${fmtUsd(range.costUsd)}';
     final activeSources =
         live.perSource.where((s) => s.active).map((s) => s.source).toList();
 
@@ -462,7 +488,8 @@ class _LiveTelemetryBanner extends ConsumerWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          '${fmtTokens(live.tokensToday)} · ${fmtUsd(live.costToday)}',
+                          periodTotal,
+                          key: const ValueKey('live-period-total'),
                           style: GlassTheme.tabularStyle(
                             fontSize: 20,
                             fontWeight: FontWeight.w700,
@@ -470,7 +497,8 @@ class _LiveTelemetryBanner extends ConsumerWidget {
                           ),
                         ),
                         Text(
-                          i18n.t('dash.tokensToday'),
+                          periodLabel,
+                          key: const ValueKey('live-period-label'),
                           style: TextStyle(
                             fontSize: 11.5,
                             color: g.textTertiary,

@@ -1,7 +1,7 @@
 name: glassusage
 description: "Real-time token usage monitor for local AI coding agents, with an Apple Liquid Glass UI."
 publish_to: 'none'
-version: 0.7.8+1
+version: 0.7.9+1
 
 environment:
   sdk: ^3.7.0
