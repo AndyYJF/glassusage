@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/format/app_format.dart';
+import '../../core/i18n/app_i18n.dart';
 import '../../core/theme/glass_theme.dart';
 import '../../domain/models/usage_models.dart';
 
@@ -123,19 +124,38 @@ class _SparklinePainter extends CustomPainter {
   }
 }
 
-// ─── 2. Interactive UsageChart (Tokens / Cost Area & Bar Chart) ─────────────
+// ─── 2. Interactive UsageChart (Multi-Series Stacked Area & Curve Chart) ────
+
+enum UsageChartColorMode {
+  source,
+  palette,
+}
+
+class _PivotedBucket {
+  final int bucket;
+  final Map<String, double> values;
+  final double total;
+
+  const _PivotedBucket({
+    required this.bucket,
+    required this.values,
+    required this.total,
+  });
+}
 
 class UsageChart extends StatefulWidget {
   const UsageChart({
     super.key,
     required this.points,
     this.showCost = false,
+    this.colorBy = UsageChartColorMode.source,
     this.accentColor,
-    this.height = 220,
+    this.height = 240,
   });
 
   final List<SeriesPoint> points;
   final bool showCost;
+  final UsageChartColorMode colorBy;
   final Color? accentColor;
   final double height;
 
@@ -146,94 +166,238 @@ class UsageChart extends StatefulWidget {
 class _UsageChartState extends State<UsageChart> {
   int? _hoverIndex;
 
+  static const List<Color> _palette = [
+    Color(0xFF0A84FF), // Blue
+    Color(0xFF5AC8FA), // Teal
+    Color(0xFFBF5AF2), // Purple
+    Color(0xFFFF9F0A), // Amber
+    Color(0xFF30D158), // Green
+    Color(0xFFFF375F), // Pink
+    Color(0xFF5E5CE6), // Indigo
+    Color(0xFFFF6B6B), // Coral
+  ];
+
+  Color _colorForKey(String key, int index, GlassTheme g) {
+    if (widget.colorBy == UsageChartColorMode.source) {
+      if (kSourceMeta.containsKey(key)) {
+        return GlassTheme.sourceColor(key);
+      }
+      if (widget.accentColor != null && index == 0) {
+        return widget.accentColor!;
+      }
+    }
+    return _palette[index % _palette.length];
+  }
+
+  String _labelForKey(String key) {
+    if (widget.colorBy == UsageChartColorMode.source) {
+      return kSourceMeta[key]?.label ?? key;
+    }
+    return key;
+  }
+
+  (List<_PivotedBucket>, List<String>) _pivotData() {
+    final byBucket = <int, Map<String, double>>{};
+    final keyTotals = <String, double>{};
+
+    for (final p in widget.points) {
+      final v = widget.showCost ? p.costUsd : p.totalTokens.toDouble();
+      final k = p.key.isEmpty ? 'unknown' : p.key;
+      keyTotals[k] = (keyTotals[k] ?? 0.0) + v;
+      final row = byBucket.putIfAbsent(p.bucket, () => <String, double>{});
+      row[k] = (row[k] ?? 0.0) + v;
+    }
+
+    final keys = keyTotals.keys.toList()
+      ..sort((a, b) => (keyTotals[b] ?? 0).compareTo(keyTotals[a] ?? 0));
+
+    final sortedBuckets = byBucket.keys.toList()..sort();
+    final rows = <_PivotedBucket>[];
+    for (final b in sortedBuckets) {
+      final raw = byBucket[b]!;
+      final values = <String, double>{};
+      var total = 0.0;
+      for (final k in keys) {
+        final v = raw[k] ?? 0.0;
+        values[k] = v;
+        total += v;
+      }
+      rows.add(_PivotedBucket(bucket: b, values: values, total: total));
+    }
+
+    return (rows, keys);
+  }
+
   @override
   Widget build(BuildContext context) {
     final g = GlassTheme.of(context);
-    final color = widget.accentColor ?? g.accentBlue;
-    final pts = widget.points;
+    final (rows, keys) = _pivotData();
+    final keyColors = <String, Color>{
+      for (var i = 0; i < keys.length; i++)
+        keys[i]: _colorForKey(keys[i], i, g),
+    };
+
+    if (rows.isEmpty) {
+      return SizedBox(
+        height: widget.height,
+        child: Center(
+          child: Text(
+            'No usage recorded in this range',
+            style: TextStyle(fontSize: 12.5, color: g.textTertiary),
+          ),
+        ),
+      );
+    }
+
+    const leftPad = 50.0;
 
     return RepaintBoundary(
-      child: SizedBox(
-        height: widget.height,
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final width = constraints.maxWidth;
-            return MouseRegion(
-              onHover: (evt) {
-                if (pts.isEmpty || width <= 0) return;
-                final ratio = (evt.localPosition.dx / width).clamp(0.0, 0.9999);
-                final idx = (ratio * pts.length).floor();
-                if (_hoverIndex != idx) {
-                  setState(() => _hoverIndex = idx);
-                }
-              },
-              onExit: (_) {
-                if (_hoverIndex != null) {
-                  setState(() => _hoverIndex = null);
-                }
-              },
-              child: Stack(
-                children: [
-                  CustomPaint(
-                    size: Size(width, widget.height),
-                    painter: _UsageChartPainter(
-                      points: pts,
-                      showCost: widget.showCost,
-                      color: color,
-                      gridColor: g.glassBorder,
-                      labelColor: g.textTertiary,
-                      hoverIndex: _hoverIndex,
-                    ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (keys.isNotEmpty) ...[
+            Wrap(
+              spacing: 14,
+              runSpacing: 6,
+              children: [
+                for (final k in keys.take(8))
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: keyColors[k],
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        _labelForKey(k),
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w500,
+                          color: g.textSecondary,
+                        ),
+                      ),
+                    ],
                   ),
-                  if (_hoverIndex != null &&
-                      _hoverIndex! >= 0 &&
-                      _hoverIndex! < pts.length)
-                    _buildTooltip(
-                      context,
-                      pts[_hoverIndex!],
-                      _hoverIndex!,
-                      pts.length,
-                      width,
-                    ),
-                ],
-              ),
-            );
-          },
-        ),
+              ],
+            ),
+            const SizedBox(height: 10),
+          ],
+          SizedBox(
+            height: widget.height,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final width = constraints.maxWidth;
+                final plotW = math.max(1.0, width - leftPad);
+                return MouseRegion(
+                  onHover: (evt) {
+                    if (rows.isEmpty || plotW <= 0) return;
+                    final relX = (evt.localPosition.dx - leftPad).clamp(
+                      0.0,
+                      plotW - 0.001,
+                    );
+                    final idx = rows.length <= 1
+                        ? 0
+                        : ((relX / plotW) * (rows.length - 1)).round().clamp(
+                            0,
+                            rows.length - 1,
+                          );
+                    if (_hoverIndex != idx) {
+                      setState(() => _hoverIndex = idx);
+                    }
+                  },
+                  onExit: (_) {
+                    if (_hoverIndex != null) {
+                      setState(() => _hoverIndex = null);
+                    }
+                  },
+                  child: Stack(
+                    children: [
+                      CustomPaint(
+                        size: Size(width, widget.height),
+                        painter: _UsageChartPainter(
+                          rows: rows,
+                          keys: keys,
+                          keyColors: keyColors,
+                          showCost: widget.showCost,
+                          leftPad: leftPad,
+                          gridColor: g.glassBorder,
+                          labelColor: g.textTertiary,
+                          hoverIndex: _hoverIndex,
+                        ),
+                      ),
+                      if (_hoverIndex != null &&
+                          _hoverIndex! >= 0 &&
+                          _hoverIndex! < rows.length)
+                        _buildTooltip(
+                          context,
+                          rows[_hoverIndex!],
+                          keys,
+                          keyColors,
+                          _hoverIndex!,
+                          rows.length,
+                          width,
+                          leftPad,
+                        ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
 
   Widget _buildTooltip(
     BuildContext context,
-    SeriesPoint pt,
+    _PivotedBucket row,
+    List<String> keys,
+    Map<String, Color> keyColors,
     int index,
     int count,
     double totalWidth,
+    double leftPad,
   ) {
     final g = GlassTheme.of(context);
-    final xRatio = count <= 1 ? 0.5 : index / (count - 1);
-    final left = (xRatio * (totalWidth - 190))
-        .clamp(8.0, math.max(8.0, totalWidth - 198))
-        .toDouble();
+    final plotW = math.max(1.0, totalWidth - leftPad);
+    final xPos = leftPad + (count <= 1 ? plotW / 2 : (index / (count - 1)) * plotW);
+    const cardW = 215.0;
+    final left = (xPos + 14 + cardW <= totalWidth)
+        ? xPos + 14
+        : math.max(leftPad + 4, xPos - cardW - 14);
+
+    final activeEntries = <MapEntry<String, double>>[
+      for (final k in keys)
+        if ((row.values[k] ?? 0) > 0) MapEntry(k, row.values[k]!),
+    ]..sort((a, b) => b.value.compareTo(a.value));
+
+    String fmtVal(double v) =>
+        widget.showCost ? fmtUsd(v) : fmtTokens(v.round());
 
     return Positioned(
-      top: 8,
+      top: 6,
       left: left,
       child: IgnorePointer(
         child: Container(
-          width: 190,
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+          width: cardW,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
           decoration: BoxDecoration(
             color: g.isDark
-                ? const Color(0xEB141826)
-                : const Color(0xF2FFFFFF),
+                ? const Color(0xF0141826)
+                : const Color(0xF5FFFFFF),
             borderRadius: BorderRadius.circular(10),
             border: Border.all(color: g.glassBorderStrong, width: 1),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.25),
-                blurRadius: 12,
+                color: Colors.black.withValues(alpha: 0.28),
+                blurRadius: 14,
               ),
             ],
           ),
@@ -242,44 +406,76 @@ class _UsageChartState extends State<UsageChart> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                AppFormat.dateTime(pt.bucket),
+                AppFormat.dateTime(row.bucket),
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
                   color: g.textSecondary,
                 ),
               ),
-              const SizedBox(height: 4),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    fmtTokens(pt.totalTokens),
-                    style: GlassTheme.tabularStyle(
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w700,
-                      color: g.textPrimary,
-                    ),
+              const SizedBox(height: 6),
+              for (final entry in activeEntries.take(8))
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 1.5),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          color: keyColors[entry.key] ?? g.accentBlue,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          _labelForKey(entry.key),
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: g.textSecondary,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        fmtVal(entry.value),
+                        style: GlassTheme.tabularStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: g.textPrimary,
+                        ),
+                      ),
+                    ],
                   ),
-                  Text(
-                    fmtUsd(pt.costUsd),
-                    style: GlassTheme.tabularStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      color: g.accentTeal,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 2),
-              Text(
-                'In ${fmtTokens(pt.totals.inputTokens)} · Out ${fmtTokens(pt.totals.outputTokens)} · Cache ${fmtTokens(pt.totals.cacheReadTokens)}',
-                style: GlassTheme.tabularStyle(
-                  fontSize: 10,
-                  color: g.textTertiary,
                 ),
-                overflow: TextOverflow.ellipsis,
-              ),
+              if (activeEntries.length > 1) ...[
+                const SizedBox(height: 5),
+                Divider(height: 1, color: g.glassBorder),
+                const SizedBox(height: 5),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Total',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: g.textPrimary,
+                      ),
+                    ),
+                    Text(
+                      fmtVal(row.total),
+                      style: GlassTheme.tabularStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: widget.showCost ? g.accentTeal : g.textPrimary,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
         ),
@@ -290,139 +486,199 @@ class _UsageChartState extends State<UsageChart> {
 
 class _UsageChartPainter extends CustomPainter {
   _UsageChartPainter({
-    required this.points,
+    required this.rows,
+    required this.keys,
+    required this.keyColors,
     required this.showCost,
-    required this.color,
+    required this.leftPad,
     required this.gridColor,
     required this.labelColor,
     required this.hoverIndex,
   });
 
-  final List<SeriesPoint> points;
+  final List<_PivotedBucket> rows;
+  final List<String> keys;
+  final Map<String, Color> keyColors;
   final bool showCost;
-  final Color color;
+  final double leftPad;
   final Color gridColor;
   final Color labelColor;
   final int? hoverIndex;
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (size.width <= 0 || size.height <= 0) return;
+    if (size.width <= leftPad || size.height <= 0) return;
 
-    const topPad = 14.0;
+    const topPad = 12.0;
     const bottomPad = 24.0;
     final chartH = math.max(10.0, size.height - topPad - bottomPad);
+    final plotW = math.max(10.0, size.width - leftPad);
 
-    // Horizontal grid lines
+    final maxVal = rows.fold<double>(
+      showCost ? 0.01 : 1.0,
+      (m, r) => math.max(m, r.total),
+    );
+
+    // Horizontal grid lines + Y-axis labels
     final gridPaint = Paint()
       ..color = gridColor
       ..strokeWidth = 1;
     for (var i = 0; i <= 3; i++) {
-      final y = topPad + (i / 3) * chartH;
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
+      final ratio = i / 3;
+      final y = topPad + ratio * chartH;
+      canvas.drawLine(Offset(leftPad, y), Offset(size.width, y), gridPaint);
+
+      final tickVal = maxVal * (1.0 - ratio);
+      final tickText =
+          showCost ? fmtUsd(tickVal) : fmtTokens(tickVal.round());
+      final tp = TextPainter(
+        text: TextSpan(
+          text: tickText,
+          style: TextStyle(fontSize: 10, color: labelColor),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(
+        canvas,
+        Offset(math.max(0, leftPad - tp.width - 6), y - tp.height / 2),
+      );
     }
 
-    if (points.isEmpty) return;
+    if (rows.isEmpty || keys.isEmpty) return;
 
-    double valOf(SeriesPoint p) =>
-        showCost ? p.costUsd : p.totalTokens.toDouble();
+    final n = rows.length;
+    double xAt(int i) =>
+        leftPad + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+    double yForVal(double v) =>
+        topPad + chartH - (v / maxVal).clamp(0.0, 1.0) * chartH;
 
-    final maxVal = points.fold<double>(
-      showCost ? 0.01 : 1.0,
-      (m, p) => math.max(m, valOf(p)),
+    // Compute cumulative stacked values per bucket
+    final cumulative = List<List<double>>.generate(
+      n,
+      (_) => List<double>.filled(keys.length + 1, 0.0),
     );
-
-    final n = points.length;
-    Offset ptOffset(int i) {
-      final x = n <= 1 ? size.width / 2 : (i / (n - 1)) * size.width;
-      final norm = (valOf(points[i]) / maxVal).clamp(0.0, 1.0);
-      final y = topPad + chartH - norm * chartH;
-      return Offset(x, y);
+    for (var i = 0; i < n; i++) {
+      var sum = 0.0;
+      for (var kIdx = 0; kIdx < keys.length; kIdx++) {
+        sum += rows[i].values[keys[kIdx]] ?? 0.0;
+        cumulative[i][kIdx + 1] = sum;
+      }
     }
 
-    final linePath = Path();
-    final areaPath = Path();
+    // Draw each series stacked band (bottom-to-top) and its top curve stroke
+    for (var kIdx = 0; kIdx < keys.length; kIdx++) {
+      final key = keys[kIdx];
+      final color = keyColors[key] ?? const Color(0xFF0A84FF);
 
-    final p0 = ptOffset(0);
-    linePath.moveTo(p0.dx, p0.dy);
-    areaPath.moveTo(p0.dx, topPad + chartH);
-    areaPath.lineTo(p0.dx, p0.dy);
+      // Check if this series has any non-zero data
+      var hasNonZero = false;
+      for (var i = 0; i < n; i++) {
+        if ((rows[i].values[key] ?? 0.0) > 0) {
+          hasNonZero = true;
+          break;
+        }
+      }
+      if (!hasNonZero) continue;
 
-    for (var i = 1; i < n; i++) {
-      final prev = ptOffset(i - 1);
-      final curr = ptOffset(i);
-      final midX = (prev.dx + curr.dx) / 2;
-      linePath.cubicTo(midX, prev.dy, midX, curr.dy, curr.dx, curr.dy);
-      areaPath.cubicTo(midX, prev.dy, midX, curr.dy, curr.dx, curr.dy);
+      final topPoints = <Offset>[
+        for (var i = 0; i < n; i++)
+          Offset(xAt(i), yForVal(cumulative[i][kIdx + 1])),
+      ];
+      final bottomPoints = <Offset>[
+        for (var i = 0; i < n; i++)
+          Offset(xAt(i), yForVal(cumulative[i][kIdx])),
+      ];
+
+      final linePath = Path()..moveTo(topPoints[0].dx, topPoints[0].dy);
+      final areaPath = Path()
+        ..moveTo(bottomPoints[0].dx, bottomPoints[0].dy)
+        ..lineTo(topPoints[0].dx, topPoints[0].dy);
+
+      for (var i = 1; i < n; i++) {
+        final prev = topPoints[i - 1];
+        final curr = topPoints[i];
+        final midX = (prev.dx + curr.dx) / 2;
+        linePath.cubicTo(midX, prev.dy, midX, curr.dy, curr.dx, curr.dy);
+        areaPath.cubicTo(midX, prev.dy, midX, curr.dy, curr.dx, curr.dy);
+      }
+
+      areaPath.lineTo(bottomPoints[n - 1].dx, bottomPoints[n - 1].dy);
+      for (var i = n - 2; i >= 0; i--) {
+        final next = bottomPoints[i + 1];
+        final curr = bottomPoints[i];
+        final midX = (next.dx + curr.dx) / 2;
+        areaPath.cubicTo(midX, next.dy, midX, curr.dy, curr.dx, curr.dy);
+      }
+      areaPath.close();
+
+      canvas.drawPath(
+        areaPath,
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              color.withValues(alpha: 0.42),
+              color.withValues(alpha: 0.06),
+            ],
+          ).createShader(Rect.fromLTWH(leftPad, topPad, plotW, chartH)),
+      );
+
+      canvas.drawPath(
+        linePath,
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.8
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round,
+      );
     }
-
-    final pLast = ptOffset(n - 1);
-    areaPath.lineTo(pLast.dx, topPad + chartH);
-    areaPath.close();
-
-    canvas.drawPath(
-      areaPath,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            color.withValues(alpha: 0.32),
-            color.withValues(alpha: 0.02),
-          ],
-        ).createShader(Rect.fromLTWH(0, topPad, size.width, chartH)),
-    );
-
-    canvas.drawPath(
-      linePath,
-      Paint()
-        ..color = color
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2.2
-        ..strokeCap = StrokeCap.round,
-    );
 
     // X-axis labels (up to 6 evenly spaced labels)
     final step = math.max(1, (n / 6).ceil());
     for (var i = 0; i < n; i += step) {
-      final pos = ptOffset(i);
+      final x = xAt(i);
       final tp = TextPainter(
         text: TextSpan(
-          text: AppFormat.date(points[i].bucket),
+          text: AppFormat.date(rows[i].bucket),
           style: TextStyle(fontSize: 10.5, color: labelColor),
         ),
         textDirection: TextDirection.ltr,
       )..layout();
-      final dx = (pos.dx - tp.width / 2)
-          .clamp(0.0, math.max(0.0, size.width - tp.width))
+      final dx = (x - tp.width / 2)
+          .clamp(leftPad, math.max(leftPad, size.width - tp.width))
           .toDouble();
       tp.paint(canvas, Offset(dx, topPad + chartH + 6));
     }
 
-    // Hover indicator line & point
+    // Hover indicator line & active series points
     if (hoverIndex != null && hoverIndex! >= 0 && hoverIndex! < n) {
-      final hp = ptOffset(hoverIndex!);
+      final hi = hoverIndex!;
+      final hx = xAt(hi);
       canvas.drawLine(
-        Offset(hp.dx, topPad),
-        Offset(hp.dx, topPad + chartH),
+        Offset(hx, topPad),
+        Offset(hx, topPad + chartH),
         Paint()
-          ..color = color.withValues(alpha: 0.45)
+          ..color = labelColor.withValues(alpha: 0.45)
           ..strokeWidth = 1.2,
       );
-      canvas.drawCircle(hp, 4.5, Paint()..color = color);
-      canvas.drawCircle(
-        hp,
-        2.2,
-        Paint()..color = Colors.white,
-      );
+      for (var kIdx = 0; kIdx < keys.length; kIdx++) {
+        final key = keys[kIdx];
+        if ((rows[hi].values[key] ?? 0.0) <= 0) continue;
+        final color = keyColors[key] ?? const Color(0xFF0A84FF);
+        final hy = yForVal(cumulative[hi][kIdx + 1]);
+        canvas.drawCircle(Offset(hx, hy), 4.2, Paint()..color = color);
+        canvas.drawCircle(Offset(hx, hy), 2.0, Paint()..color = Colors.white);
+      }
     }
   }
 
   @override
   bool shouldRepaint(covariant _UsageChartPainter oldDelegate) {
-    return oldDelegate.points != points ||
+    return oldDelegate.rows != rows ||
+        oldDelegate.keys != keys ||
         oldDelegate.showCost != showCost ||
-        oldDelegate.color != color ||
         oldDelegate.hoverIndex != hoverIndex;
   }
 }

@@ -24,7 +24,9 @@ class AgentDetailPage extends ConsumerStatefulWidget {
 class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
   String? _selectedInstance;
   AgentStats? _stats;
+  List<SeriesPoint> _series = const [];
   List<UsageRow> _recentEvents = const [];
+  bool _showCostSeries = false;
   bool _loading = false;
 
   @override
@@ -55,6 +57,10 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
           widget.sourceId,
           instance: _selectedInstance,
         ),
+        controller.getAgentTimeseries(
+          widget.sourceId,
+          instance: _selectedInstance,
+        ),
         controller.queryUsageLog(
           UsageFilter(
             from: from,
@@ -70,7 +76,8 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
       if (mounted) {
         setState(() {
           _stats = results[0] as AgentStats;
-          _recentEvents = (results[1] as Page<UsageRow>).rows;
+          _series = results[1] as List<SeriesPoint>;
+          _recentEvents = (results[2] as Page<UsageRow>).rows;
           _loading = false;
         });
       }
@@ -252,10 +259,52 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
           ),
           const SizedBox(height: 16),
 
-          // 3. Instances & Models Breakdown
+          // 3. Time-Series Usage Chart (By Model)
+          GlassCard(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        i18n.t('dash.activityOverTime'),
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: g.textPrimary,
+                        ),
+                      ),
+                    ),
+                    GlassSegmented<bool>(
+                      value: _showCostSeries,
+                      compact: true,
+                      options: [
+                        (false, i18n.t('common.tokens')),
+                        (true, i18n.t('common.cost')),
+                      ],
+                      onChanged: (v) => setState(() => _showCostSeries = v),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                UsageChart(
+                  points: _series,
+                  showCost: _showCostSeries,
+                  colorBy: UsageChartColorMode.palette,
+                  accentColor: brandColor,
+                  height: 220,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // 4. Models, Projects & Instances Breakdown
           LayoutBuilder(
             builder: (context, constraints) {
-              final cols = constraints.maxWidth > 820 ? 2 : 1;
+              final cols = constraints.maxWidth > 900 ? 3 : 1;
               const spacing = 12.0;
               final itemW =
                   (constraints.maxWidth - spacing * (cols - 1)) / cols;
@@ -263,6 +312,68 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
                 spacing: spacing,
                 runSpacing: spacing,
                 children: [
+                  SizedBox(
+                    width: itemW,
+                    child: GlassCard(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            i18n.t('agent.topModels'),
+                            style: TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w600,
+                              color: g.textPrimary,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          ShareList(
+                            emptyText: i18n.t('common.noData'),
+                            items: (_stats?.perModel ?? const []).map((m) {
+                              return ShareListItemData(
+                                label: m.label,
+                                tokens: m.totalTokens,
+                                costUsd: m.costUsd,
+                                share: m.share,
+                                color: brandColor,
+                              );
+                            }).toList(),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: itemW,
+                    child: GlassCard(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            i18n.t('compare.byProject'),
+                            style: TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w600,
+                              color: g.textPrimary,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          ShareList(
+                            emptyText: i18n.t('common.noData'),
+                            items: (_stats?.perProject ?? const []).map((p) {
+                              return ShareListItemData(
+                                label: AppFormat.projectLabel(p.label),
+                                tokens: p.totalTokens,
+                                costUsd: p.costUsd,
+                                share: p.share,
+                                color: g.accentTeal,
+                              );
+                            }).toList(),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                   SizedBox(
                     width: itemW,
                     child: GlassCard(
@@ -326,37 +437,6 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
                               ),
                             ),
                           ],
-                        ],
-                      ),
-                    ),
-                  ),
-                  SizedBox(
-                    width: itemW,
-                    child: GlassCard(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            i18n.t('agent.topModels'),
-                            style: TextStyle(
-                              fontSize: 13.5,
-                              fontWeight: FontWeight.w600,
-                              color: g.textPrimary,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          ShareList(
-                            emptyText: i18n.t('common.noData'),
-                            items: (_stats?.perModel ?? const []).map((m) {
-                              return ShareListItemData(
-                                label: m.label,
-                                tokens: m.totalTokens,
-                                costUsd: m.costUsd,
-                                share: m.share,
-                                color: brandColor,
-                              );
-                            }).toList(),
-                          ),
                         ],
                       ),
                     ),

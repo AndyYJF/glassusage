@@ -321,7 +321,7 @@ class AppController {
         from: from,
         to: to,
         bucket: bucket,
-        groupBy: 'total',
+        groupBy: 'source',
       ),
       client.getModelStats(filter),
       client.getGroupStats('project', filter),
@@ -505,6 +505,22 @@ class AppController {
     final client = _client!;
     final (from, to, _) = ref.read(selectedRangeProvider).resolveBounds();
     return client.getAgentStats(source, from, to, instance: instance);
+  }
+
+  Future<List<SeriesPoint>> getAgentTimeseries(
+    String source, {
+    String? instance,
+  }) async {
+    final client = _client!;
+    final (from, to, bucket) = ref.read(selectedRangeProvider).resolveBounds();
+    return client.getTimeseries(
+      from: from,
+      to: to,
+      bucket: bucket,
+      groupBy: 'model_norm',
+      source: source,
+      instance: instance,
+    );
   }
 
   Future<String> exportData({

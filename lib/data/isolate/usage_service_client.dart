@@ -165,6 +165,7 @@ class UsageServiceClient {
     required String bucket,
     required String groupBy,
     String? source,
+    String? instance,
   }) async {
     final res = await _call('get_timeseries', {
       'from': from,
@@ -172,6 +173,7 @@ class UsageServiceClient {
       'bucket': bucket,
       'groupBy': groupBy,
       'source': source,
+      'instance': instance,
     });
     return (res as List)
         .map((e) => SeriesPoint.fromJson((e as Map).cast<String, dynamic>()))

@@ -815,6 +815,7 @@ class AppDatabase {
     required String bucket,
     required String groupBy,
     String? source,
+    String? instance,
   }) {
     // Anti-Jank Rule 2: For day/week buckets grouped by source, model_norm, or total,
     // query `daily_rollup` first instead of scanning raw `usage_events`.
@@ -829,7 +830,16 @@ class AppDatabase {
         'model_norm' => 'model_norm',
         _ => "'total'",
       };
-      final sourceClause = source != null ? 'AND source = ?3' : '';
+      final rollArgs = <Object?>[fromDay, toDay];
+      final extraClauses = <String>[];
+      if (source != null) {
+        rollArgs.add(source);
+        extraClauses.add('AND source = ?${rollArgs.length}');
+      }
+      if (instance != null) {
+        rollArgs.add(instance);
+        extraClauses.add('AND instance = ?${rollArgs.length}');
+      }
       final rows = _db.select(
         '''
         SELECT
@@ -844,11 +854,11 @@ class AppDatabase {
           SUM(events) AS ev,
           SUM(unpriced_events) AS unpriced
         FROM daily_rollup
-        WHERE day >= ?1 AND day <= ?2 $sourceClause
+        WHERE day >= ?1 AND day <= ?2 ${extraClauses.join(' ')}
         GROUP BY day, grp_key
         ORDER BY day ASC
         ''',
-        source != null ? [fromDay, toDay, source] : [fromDay, toDay],
+        rollArgs,
       );
 
       if (bucket == 'day') {
@@ -906,7 +916,16 @@ class AppDatabase {
       _ => "'total'",
     };
 
-    final sourceClause = source != null ? 'AND source = ?3' : '';
+    final rawArgs = <Object?>[fromMs, toMs];
+    final extraClauses = <String>[];
+    if (source != null) {
+      rawArgs.add(source);
+      extraClauses.add('AND source = ?${rawArgs.length}');
+    }
+    if (instance != null) {
+      rawArgs.add(instance);
+      extraClauses.add('AND instance = ?${rawArgs.length}');
+    }
     final sql = '''
       SELECT
         $bucketExpr AS b,
@@ -920,14 +939,14 @@ class AppDatabase {
         COUNT(*) AS ev,
         SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unpriced
       FROM usage_events
-      WHERE ts_ms >= ?1 AND ts_ms <= ?2 $sourceClause
+      WHERE ts_ms >= ?1 AND ts_ms <= ?2 ${extraClauses.join(' ')}
       GROUP BY b, grp_key
       ORDER BY b ASC
     ''';
 
     final rows = _db.select(
       sql,
-      source != null ? [fromMs, toMs, source] : [fromMs, toMs],
+      rawArgs,
     );
     return rows
         .map(

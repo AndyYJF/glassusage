@@ -591,6 +591,7 @@ class _UsageWorkerEngine {
         final bucket = args['bucket'] as String? ?? 'day';
         final groupBy = args['groupBy'] as String? ?? 'source';
         final source = args['source'] as String?;
+        final instance = args['instance'] as String?;
         return store
             .timeseries(
               fromMs: from,
@@ -598,6 +599,7 @@ class _UsageWorkerEngine {
               bucket: bucket,
               groupBy: groupBy,
               source: source,
+              instance: instance,
             )
             .map((p) => p.toJson())
             .toList();
