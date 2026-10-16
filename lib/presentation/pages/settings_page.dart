@@ -8,7 +8,7 @@ import 'package:http/http.dart' as http;
 import '../../core/format/app_format.dart';
 import '../../core/i18n/app_i18n.dart';
 import '../../core/theme/glass_theme.dart';
-import '../../core/window/win32_bridge.dart';
+import '../../core/window/desktop_window_manager.dart';
 import '../../data/pricing/pricing_service.dart';
 import '../../data/updates/signed_update.dart';
 import '../../domain/models/settings_model.dart';
@@ -649,7 +649,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 GlassButton(
                   label: i18n.t('settings.openDataDir'),
                   icon: Icons.folder_open_rounded,
-                  onPressed: () => Win32Bridge.instance.openDataDir(dataDir),
+                  onPressed: () => DesktopWindowManager.instance.openDataDir(dataDir),
                 ),
               ],
             ),

@@ -1,27 +1,10 @@
 #include "win32_window.h"
 
-#include <dwmapi.h>
 #include <flutter_windows.h>
-#include <uxtheme.h>
 
 #include "resource.h"
 
 namespace {
-
-/// Window attribute that enables dark mode window decorations.
-///
-/// Redefined in case the developer's machine has a Windows SDK older than
-/// version 10.0.22000.0.
-/// See: https://docs.microsoft.com/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
-#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
-#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
-#endif
-#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
-#define DWMWA_WINDOW_CORNER_PREFERENCE 33
-#endif
-#ifndef DWMWA_SYSTEMBACKDROP_TYPE
-#define DWMWA_SYSTEMBACKDROP_TYPE 38
-#endif
 
 constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
 
@@ -37,12 +20,6 @@ constexpr const wchar_t kGetPreferredBrightnessRegValue[] = L"AppsUseLightTheme"
 static int g_active_window_count = 0;
 
 using EnableNonClientDpiScaling = BOOL __stdcall(HWND hwnd);
-
-// Scale helper to convert logical scaler values to physical using passed in
-// scale factor
-int Scale(int source, double scale_factor) {
-  return static_cast<int>(source * scale_factor);
-}
 
 // Dynamically loads the |EnableNonClientDpiScaling| from the User32 module.
 // This API is only needed for PerMonitor V1 awareness mode.
@@ -135,47 +112,14 @@ bool Win32Window::Create(const std::wstring& title,
   const wchar_t* window_class =
       WindowClassRegistrar::GetInstance()->GetWindowClass();
 
-  const POINT target_point = {static_cast<LONG>(origin.x),
-                              static_cast<LONG>(origin.y)};
-  HMONITOR monitor = MonitorFromPoint(target_point, MONITOR_DEFAULTTONEAREST);
-  UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
-  double scale_factor = dpi / 96.0;
-
-  // Omit WS_SYSMENU so Windows 11 DWM does not composite native Minimize /
-  // Maximize / Close caption glyphs over our custom Flutter titlebar or MiniCard.
-  constexpr DWORD kBorderlessStyle =
-      WS_OVERLAPPED | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-
   HWND window = CreateWindow(
-      window_class, title.c_str(), kBorderlessStyle,
-      Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
-      Scale(size.width, scale_factor), Scale(size.height, scale_factor),
+      window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
+      origin.x, origin.y, size.width, size.height,
       nullptr, nullptr, GetModuleHandle(nullptr), this);
 
   if (!window) {
     return false;
   }
-
-  WTA_OPTIONS wta_opts{};
-  wta_opts.dwFlags = WTNCA_NODRAWCAPTION | WTNCA_NODRAWICON |
-                     WTNCA_NOSYSMENU | WTNCA_NOMIRRORHELP;
-  wta_opts.dwMask = WTNCA_VALIDBITS;
-  SetWindowThemeAttribute(window, WTA_NONCLIENT, &wta_opts, sizeof(wta_opts));
-
-  UpdateTheme(window);
-
-  // Enable rounded corners and Acrylic backdrop by default.
-  DWORD corner_pref = 2;  // DWMWCP_ROUND
-  DwmSetWindowAttribute(window, DWMWA_WINDOW_CORNER_PREFERENCE, &corner_pref,
-                        sizeof(corner_pref));
-  DWORD backdrop_type = 3;  // DWMSBT_TRANSIENTWINDOW (Acrylic)
-  DwmSetWindowAttribute(window, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop_type,
-                        sizeof(backdrop_type));
-  MARGINS margins = {-1, -1, -1, -1};
-  DwmExtendFrameIntoClientArea(window, &margins);
-  SetWindowPos(window, nullptr, 0, 0, 0, 0,
-               SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
-                   SWP_NOOWNERZORDER);
 
   return OnCreate();
 }
@@ -262,9 +206,6 @@ Win32Window::MessageHandler(HWND hwnd,
       }
       return 0;
 
-    case WM_DWMCOLORIZATIONCOLORCHANGED:
-      UpdateTheme(hwnd);
-      return 0;
   }
 
   return DefWindowProc(window_handle_, message, wparam, lparam);
@@ -319,10 +260,4 @@ bool Win32Window::OnCreate() {
 
 void Win32Window::OnDestroy() {
   // No-op; provided for subclasses.
-}
-
-void Win32Window::UpdateTheme(HWND const window) {
-  BOOL enable_dark_mode = TRUE;
-  DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                        &enable_dark_mode, sizeof(enable_dark_mode));
 }

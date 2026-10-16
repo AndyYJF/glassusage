@@ -7,7 +7,7 @@ import 'package:path/path.dart' as p;
 import '../../core/format/app_format.dart';
 import '../../core/i18n/app_i18n.dart';
 import '../../core/theme/glass_theme.dart';
-import '../../core/window/win32_bridge.dart';
+import '../../core/window/desktop_window_manager.dart';
 import '../../domain/models/usage_models.dart';
 import '../providers/app_providers.dart';
 import '../widgets/glass_widgets.dart';
@@ -107,7 +107,7 @@ class _UsagePageState extends ConsumerState<UsagePage> {
               i18n.t('usage.exportedTo', {'path': savedPath}),
         );
       }
-      await Win32Bridge.instance.openDataDir(p.dirname(savedPath));
+      await DesktopWindowManager.instance.openDataDir(p.dirname(savedPath));
     } catch (e) {
       if (mounted) {
         setState(() => _statusMessage = 'Export failed: $e');

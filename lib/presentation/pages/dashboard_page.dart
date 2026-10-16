@@ -18,8 +18,6 @@ class DashboardPage extends ConsumerStatefulWidget {
 }
 
 class _DashboardPageState extends ConsumerState<DashboardPage> {
-  bool _showCostSeries = false;
-
   @override
   Widget build(BuildContext context) {
     final g = GlassTheme.of(context);
@@ -121,36 +119,20 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        i18n.t('dash.activityOverTime'),
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: g.textPrimary,
-                        ),
-                      ),
-                    ),
-                    GlassSegmented<bool>(
-                      value: _showCostSeries,
-                      compact: true,
-                      options: [
-                        (false, i18n.t('common.tokens')),
-                        (true, i18n.t('common.cost')),
-                      ],
-                      onChanged: (v) => setState(() => _showCostSeries = v),
-                    ),
-                  ],
+                Text(
+                  i18n.t('dash.activityOverTime'),
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: g.textPrimary,
+                  ),
                 ),
                 const SizedBox(height: 14),
                 UsageChart(
                   i18n: i18n,
                   bucket: ref.watch(selectedRangeProvider).resolveBounds().$3,
                   points: series,
-                  showCost: _showCostSeries,
-                  accentColor: _showCostSeries ? g.accentTeal : g.accentBlue,
+                  accentColor: g.accentBlue,
                   height: 220,
                 ),
               ],

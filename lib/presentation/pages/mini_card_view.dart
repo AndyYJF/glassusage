@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/format/app_format.dart';
 import '../../core/theme/glass_theme.dart';
-import '../../core/window/win32_bridge.dart';
+import '../../core/window/desktop_window_manager.dart';
 import '../../domain/models/usage_models.dart';
 import '../providers/app_providers.dart';
 import '../widgets/charts.dart';
@@ -24,7 +24,7 @@ class MiniCardView extends ConsumerWidget {
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
       onPanStart: (_) {
-        Win32Bridge.instance.startDragging(snapAfterDrag: true);
+        DesktopWindowManager.instance.startDragging();
       },
       child: Container(
         decoration: BoxDecoration(
