@@ -143,6 +143,7 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
                 ),
                 const SizedBox(height: 14),
                 UsageChart(
+                  i18n: i18n,
                   bucket: ref.watch(selectedRangeProvider).resolveBounds().$3,
                   points: series,
                   showCost: _showCostSeries,

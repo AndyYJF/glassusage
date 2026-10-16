@@ -284,6 +284,7 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
                 ),
                 const SizedBox(height: 14),
                 UsageChart(
+                  i18n: i18n,
                   bucket: ref.watch(selectedRangeProvider).resolveBounds().$3,
                   points: _series,
                   showCost: _showCostSeries,
