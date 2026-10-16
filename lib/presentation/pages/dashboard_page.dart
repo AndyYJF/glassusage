@@ -143,10 +143,10 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
                 ),
                 const SizedBox(height: 14),
                 UsageChart(
+                  bucket: ref.watch(selectedRangeProvider).resolveBounds().$3,
                   points: series,
                   showCost: _showCostSeries,
-                  accentColor:
-                      _showCostSeries ? g.accentTeal : g.accentBlue,
+                  accentColor: _showCostSeries ? g.accentTeal : g.accentBlue,
                   height: 220,
                 ),
               ],
@@ -182,20 +182,22 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
                           const SizedBox(height: 12),
                           ShareList(
                             emptyText: i18n.t('common.noData'),
-                            items: (overview?.perSource ?? const []).map((s) {
-                              final meta = kSourceMeta[s.key];
-                              return ShareListItemData(
-                                label: meta?.label ?? s.label,
-                                tokens: s.totalTokens,
-                                costUsd: s.costUsd,
-                                share: s.share,
-                                color: GlassTheme.sourceColor(s.key),
-                                onTap: () {
-                                  ref.read(activeRouteProvider.notifier).state =
-                                      'agent:${s.key}';
-                                },
-                              );
-                            }).toList(),
+                            items:
+                                (overview?.perSource ?? const []).map((s) {
+                                  final meta = kSourceMeta[s.key];
+                                  return ShareListItemData(
+                                    label: meta?.label ?? s.label,
+                                    tokens: s.totalTokens,
+                                    costUsd: s.costUsd,
+                                    share: s.share,
+                                    color: GlassTheme.sourceColor(s.key),
+                                    onTap: () {
+                                      ref
+                                          .read(activeRouteProvider.notifier)
+                                          .state = 'agent:${s.key}';
+                                    },
+                                  );
+                                }).toList(),
                           ),
                         ],
                       ),
@@ -218,15 +220,16 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
                           const SizedBox(height: 12),
                           ShareList(
                             emptyText: i18n.t('common.noData'),
-                            items: models.map((m) {
-                              return ShareListItemData(
-                                label: m.label,
-                                tokens: m.totalTokens,
-                                costUsd: m.costUsd,
-                                share: m.share,
-                                color: g.accentBlue,
-                              );
-                            }).toList(),
+                            items:
+                                models.map((m) {
+                                  return ShareListItemData(
+                                    label: m.label,
+                                    tokens: m.totalTokens,
+                                    costUsd: m.costUsd,
+                                    share: m.share,
+                                    color: g.accentBlue,
+                                  );
+                                }).toList(),
                           ),
                         ],
                       ),
@@ -249,15 +252,16 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
                           const SizedBox(height: 12),
                           ShareList(
                             emptyText: i18n.t('common.noData'),
-                            items: projects.map((p) {
-                              return ShareListItemData(
-                                label: AppFormat.projectLabel(p.label),
-                                tokens: p.totalTokens,
-                                costUsd: p.costUsd,
-                                share: p.share,
-                                color: g.accentPurple,
-                              );
-                            }).toList(),
+                            items:
+                                projects.map((p) {
+                                  return ShareListItemData(
+                                    label: AppFormat.projectLabel(p.label),
+                                    tokens: p.totalTokens,
+                                    costUsd: p.costUsd,
+                                    share: p.share,
+                                    color: g.accentPurple,
+                                  );
+                                }).toList(),
                           ),
                         ],
                       ),
@@ -285,9 +289,10 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
                 const SizedBox(height: 12),
                 LayoutBuilder(
                   builder: (context, constraints) {
-                    final cols = constraints.maxWidth > 920
-                        ? 5
-                        : (constraints.maxWidth > 580 ? 3 : 2);
+                    final cols =
+                        constraints.maxWidth > 920
+                            ? 5
+                            : (constraints.maxWidth > 580 ? 3 : 2);
                     const spacing = 10.0;
                     final itemW =
                         (constraints.maxWidth - spacing * (cols - 1)) / cols;
@@ -378,9 +383,8 @@ class _LiveTelemetryBanner extends ConsumerWidget {
                       width: 8,
                       height: 8,
                       decoration: BoxDecoration(
-                        color: activeSources.isNotEmpty
-                            ? g.success
-                            : g.accentBlue,
+                        color:
+                            activeSources.isNotEmpty ? g.success : g.accentBlue,
                         shape: BoxShape.circle,
                         boxShadow: [
                           BoxShadow(

@@ -10,10 +10,7 @@ import '../widgets/charts.dart';
 import '../widgets/glass_widgets.dart';
 
 class AgentDetailPage extends ConsumerStatefulWidget {
-  const AgentDetailPage({
-    super.key,
-    required this.sourceId,
-  });
+  const AgentDetailPage({super.key, required this.sourceId});
 
   final String sourceId;
 
@@ -28,6 +25,7 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
   List<UsageRow> _recentEvents = const [];
   bool _showCostSeries = false;
   bool _loading = false;
+  int _loadRequest = 0;
 
   @override
   void initState() {
@@ -48,15 +46,13 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
     final controller = ref.read(appControllerProvider);
     final client = controller.client;
     if (client == null || !mounted) return;
+    final request = ++_loadRequest;
     setState(() => _loading = true);
     try {
       final preset = ref.read(selectedRangeProvider);
       final (from, to, _) = preset.resolveBounds();
       final results = await Future.wait([
-        controller.getAgentStats(
-          widget.sourceId,
-          instance: _selectedInstance,
-        ),
+        controller.getAgentStats(widget.sourceId, instance: _selectedInstance),
         controller.getAgentTimeseries(
           widget.sourceId,
           instance: _selectedInstance,
@@ -66,14 +62,13 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
             from: from,
             to: to,
             sources: [widget.sourceId],
-            instances:
-                _selectedInstance == null ? null : [_selectedInstance!],
+            instances: _selectedInstance == null ? null : [_selectedInstance!],
           ),
           0,
           25,
         ),
       ]);
-      if (mounted) {
+      if (mounted && request == _loadRequest) {
         setState(() {
           _stats = results[0] as AgentStats;
           _series = results[1] as List<SeriesPoint>;
@@ -82,7 +77,7 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
         });
       }
     } catch (_) {
-      if (mounted) setState(() => _loading = false);
+      if (mounted && request == _loadRequest) setState(() => _loading = false);
     }
   }
 
@@ -103,15 +98,16 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
 
     final totals = _stats?.totals ?? const TokenBreakdown();
 
-    final agentRollup = ref
-        .watch(agentRollupProvider)
-        .where((r) => r.source == widget.sourceId)
-        .firstOrNull;
+    final agentRollup =
+        ref
+            .watch(agentRollupProvider)
+            .where((r) => r.source == widget.sourceId)
+            .firstOrNull;
 
-    final badgeCode = (meta?.label ?? widget.sourceId)
-        .substring(
-            0, (meta?.label ?? widget.sourceId).length >= 2 ? 2 : 1)
-        .toUpperCase();
+    final badgeCode =
+        (meta?.label ?? widget.sourceId)
+            .substring(0, (meta?.label ?? widget.sourceId).length >= 2 ? 2 : 1)
+            .toUpperCase();
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(24, 8, 24, 28),
@@ -160,10 +156,7 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
                           ),
                           const SizedBox(width: 10),
                           if (agentRollup != null)
-                            StatusPill(
-                              status: agentRollup.status,
-                              i18n: i18n,
-                            ),
+                            StatusPill(status: agentRollup.status, i18n: i18n),
                         ],
                       ),
                       const SizedBox(height: 3),
@@ -246,11 +239,12 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
                             : instancesForAgent.length,
                       ),
                       accentColor: g.accentAmber,
-                      subtitle: instancesForAgent.isEmpty
-                          ? 'local'
-                          : instancesForAgent
-                              .map((e) => e.instance)
-                              .join(', '),
+                      subtitle:
+                          instancesForAgent.isEmpty
+                              ? 'local'
+                              : instancesForAgent
+                                  .map((e) => e.instance)
+                                  .join(', '),
                     ),
                   ),
                 ],
@@ -290,6 +284,7 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
                 ),
                 const SizedBox(height: 14),
                 UsageChart(
+                  bucket: ref.watch(selectedRangeProvider).resolveBounds().$3,
                   points: _series,
                   showCost: _showCostSeries,
                   colorBy: UsageChartColorMode.palette,
@@ -329,15 +324,16 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
                           const SizedBox(height: 12),
                           ShareList(
                             emptyText: i18n.t('common.noData'),
-                            items: (_stats?.perModel ?? const []).map((m) {
-                              return ShareListItemData(
-                                label: m.label,
-                                tokens: m.totalTokens,
-                                costUsd: m.costUsd,
-                                share: m.share,
-                                color: brandColor,
-                              );
-                            }).toList(),
+                            items:
+                                (_stats?.perModel ?? const []).map((m) {
+                                  return ShareListItemData(
+                                    label: m.label,
+                                    tokens: m.totalTokens,
+                                    costUsd: m.costUsd,
+                                    share: m.share,
+                                    color: brandColor,
+                                  );
+                                }).toList(),
                           ),
                         ],
                       ),
@@ -360,15 +356,16 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
                           const SizedBox(height: 12),
                           ShareList(
                             emptyText: i18n.t('common.noData'),
-                            items: (_stats?.perProject ?? const []).map((p) {
-                              return ShareListItemData(
-                                label: AppFormat.projectLabel(p.label),
-                                tokens: p.totalTokens,
-                                costUsd: p.costUsd,
-                                share: p.share,
-                                color: g.accentTeal,
-                              );
-                            }).toList(),
+                            items:
+                                (_stats?.perProject ?? const []).map((p) {
+                                  return ShareListItemData(
+                                    label: AppFormat.projectLabel(p.label),
+                                    tokens: p.totalTokens,
+                                    costUsd: p.costUsd,
+                                    share: p.share,
+                                    color: g.accentTeal,
+                                  );
+                                }).toList(),
                           ),
                         ],
                       ),
@@ -429,10 +426,7 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
                                     ),
                                   ),
                                   const SizedBox(width: 8),
-                                  StatusPill(
-                                    status: inst.status,
-                                    i18n: i18n,
-                                  ),
+                                  StatusPill(status: inst.status, i18n: i18n),
                                 ],
                               ),
                             ),

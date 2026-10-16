@@ -53,9 +53,9 @@ class ScanReport {
     this.filesSeen = 0,
     this.skipped = 0,
     List<String>? detectedPaths,
-  })  : events = events ?? [],
-        states = states ?? [],
-        detectedPaths = detectedPaths ?? [];
+  }) : events = events ?? [],
+       states = states ?? [],
+       detectedPaths = detectedPaths ?? [];
 
   void merge(ScanReport other) {
     events.addAll(other.events);
@@ -196,6 +196,7 @@ List<UsageEvent> finalizeEvents(
     if (e.modelNorm.isEmpty) {
       e.modelNorm = pricing.normalize(e.model);
     }
+    e.costIsNative ??= e.costUsd != null;
     e.costUsd ??= pricing.cost(
       e.modelNorm,
       e.inputTokens,
@@ -305,7 +306,7 @@ JsonlChunk readLinesFromOffset(
 
   var lastNewline = -1;
   for (var i = buf.length - 1; i >= 0; i--) {
-    if (buf[i] == 0x0A /* \n */) {
+    if (buf[i] == 0x0A /* \n */ ) {
       lastNewline = i + 1;
       break;
     }

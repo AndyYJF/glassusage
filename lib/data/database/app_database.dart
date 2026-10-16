@@ -9,12 +9,9 @@ import '../../domain/models/settings_model.dart';
 import '../../domain/models/usage_models.dart';
 import '../pricing/pricing_service.dart';
 
-const int kSchemaVersion = 1;
+const int kSchemaVersion = 2;
 
-enum WriteMode {
-  insertOrIgnore,
-  upsert,
-}
+enum WriteMode { insertOrIgnore, upsert }
 
 int nowMs() => DateTime.now().millisecondsSinceEpoch;
 
@@ -115,6 +112,7 @@ class AppDatabase {
         cache_write_tokens INTEGER NOT NULL DEFAULT 0,
         reasoning_tokens   INTEGER NOT NULL DEFAULT 0,
         cost_usd           REAL,
+        cost_is_native     INTEGER NOT NULL DEFAULT 0,
         dedup_key          TEXT    NOT NULL,
         UNIQUE(source, instance, dedup_key)
       );
@@ -186,6 +184,19 @@ class AppDatabase {
       );
     ''');
 
+    final eventCols = _db.select('PRAGMA table_info(usage_events)');
+    if (!eventCols.any((r) => r['name'] == 'cost_is_native')) {
+      _db.execute(
+        'ALTER TABLE usage_events ADD COLUMN cost_is_native INTEGER NOT NULL DEFAULT 0',
+      );
+      // Legacy rows do not record provenance. Preserve existing bills for sources
+      // that can report actual charges rather than silently replacing them.
+      _db.execute("""
+        UPDATE usage_events SET cost_is_native = 1
+        WHERE cost_usd IS NOT NULL AND source IN ('cursor','hermes','pi','openclaw','opencode')
+      """);
+    }
+
     final cols = _db.select('PRAGMA table_info(remote_instances)');
     final hasProxy = cols.any((r) => r['name'] == 'proxy_url');
     if (!hasProxy) {
@@ -234,9 +245,9 @@ class AppDatabase {
     final rollupCount =
         _db.select('SELECT COUNT(*) AS c FROM daily_rollup').first['c'] as int;
     if (rollupCount == 0) {
-      final evCount = _db
-          .select('SELECT COUNT(*) AS c FROM usage_events')
-          .first['c'] as int;
+      final evCount =
+          _db.select('SELECT COUNT(*) AS c FROM usage_events').first['c']
+              as int;
       if (evCount > 0) {
         _rebuildAllRollup();
       }
@@ -269,13 +280,12 @@ class AppDatabase {
           ts_ms, source, surface, instance, session_id, project, provider,
           model, model_norm, input_tokens, output_tokens,
           cache_read_tokens, cache_write_tokens, reasoning_tokens,
-          cost_usd, dedup_key
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+          cost_usd, dedup_key, cost_is_native
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
       ''');
 
       final prevTotalsStmt = _db.prepare('''
-        SELECT input_tokens + output_tokens + cache_read_tokens + cache_write_tokens AS total,
-               ts_ms
+        SELECT *, input_tokens + output_tokens + cache_read_tokens + cache_write_tokens AS total
         FROM usage_events
         WHERE source = ?1 AND instance = ?2 AND dedup_key = ?3
       ''');
@@ -285,8 +295,8 @@ class AppDatabase {
           ts_ms, source, surface, instance, session_id, project, provider,
           model, model_norm, input_tokens, output_tokens,
           cache_read_tokens, cache_write_tokens, reasoning_tokens,
-          cost_usd, dedup_key
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+          cost_usd, dedup_key, cost_is_native
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
         ON CONFLICT(source, instance, dedup_key) DO UPDATE SET
           ts_ms              = excluded.ts_ms,
           surface            = excluded.surface,
@@ -300,7 +310,8 @@ class AppDatabase {
           cache_read_tokens  = excluded.cache_read_tokens,
           cache_write_tokens = excluded.cache_write_tokens,
           reasoning_tokens   = excluded.reasoning_tokens,
-          cost_usd           = excluded.cost_usd
+          cost_usd           = excluded.cost_usd,
+          cost_is_native     = excluded.cost_is_native
       ''');
 
       final stateStmt = _db.prepare('''
@@ -332,6 +343,10 @@ class AppDatabase {
             e.reasoningTokens,
             e.costUsd,
             e.dedupKey,
+            (e.costIsNative ??
+                    (sourceHasNativeCost(e.source) && e.costUsd != null))
+                ? 1
+                : 0,
           ];
 
           if (mode == WriteMode.insertOrIgnore) {
@@ -362,15 +377,42 @@ class AppDatabase {
               prevTs = (prevRows.first['ts_ms'] as num?)?.toInt();
             }
 
+            const columns = [
+              'ts_ms',
+              'source',
+              'surface',
+              'instance',
+              'session_id',
+              'project',
+              'provider',
+              'model',
+              'model_norm',
+              'input_tokens',
+              'output_tokens',
+              'cache_read_tokens',
+              'cache_write_tokens',
+              'reasoning_tokens',
+              'cost_usd',
+              'dedup_key',
+              'cost_is_native',
+            ];
+            final rowChanged =
+                prevRows.isEmpty ||
+                List.generate(params.length, (i) => i).any((i) {
+                  // Match the COALESCE behavior in the upsert above.
+                  if ((i == 5 || i == 6) && params[i] == null) return false;
+                  return prevRows.first[columns[i]] != params[i];
+                });
+            if (!rowChanged) continue;
             upsertStmt.execute(params);
             final deltaTokens = e.totalTokens - (prevTotal ?? 0);
             final deltaEvents = prevTotal == null ? 1 : 0;
+            changed += 1;
+            dirtyDays.add(_localDateString(e.timestamp));
+            if (prevTs != null) {
+              dirtyDays.add(_localDateString(prevTs));
+            }
             if (deltaTokens > 0 || deltaEvents > 0) {
-              changed += 1;
-              dirtyDays.add(_localDateString(e.timestamp));
-              if (prevTs != null) {
-                dirtyDays.add(_localDateString(prevTs));
-              }
               deltas.add(
                 DeltaEvent(
                   source: e.source,
@@ -504,29 +546,26 @@ class AppDatabase {
 
   int reprice(PricingService pricing) {
     final rows = _db.select('''
-      SELECT id, source, model, model_norm, input_tokens, output_tokens,
-             cache_read_tokens, cache_write_tokens, cost_usd
+      SELECT id, model, model_norm, input_tokens, output_tokens,
+             cache_read_tokens, cache_write_tokens, cost_usd, cost_is_native
       FROM usage_events
     ''');
 
     final toUpdate = <(String, double?, int)>[];
     for (final r in rows) {
       final id = (r['id'] as num).toInt();
-      final source = r['source'] as String;
       final model = r['model'] as String;
       final oldNorm = r['model_norm'] as String;
       final oldCost = (r['cost_usd'] as num?)?.toDouble();
+      final nativeCost = (r['cost_is_native'] as num).toInt() != 0;
       final input = (r['input_tokens'] as num?)?.toInt() ?? 0;
       final output = (r['output_tokens'] as num?)?.toInt() ?? 0;
       final cr = (r['cache_read_tokens'] as num?)?.toInt() ?? 0;
       final cw = (r['cache_write_tokens'] as num?)?.toInt() ?? 0;
 
       final norm = pricing.normalize(model);
-      final cost = pricing.cost(norm, input, output, cr, cw);
-
-      if (sourceHasNativeCost(source) && cost == null) {
-        continue;
-      }
+      final cost =
+          nativeCost ? oldCost : pricing.cost(norm, input, output, cr, cw);
       if (norm != oldNorm || !_sameCost(cost, oldCost)) {
         toUpdate.add((norm, cost, id));
       }
@@ -643,15 +682,7 @@ class AppDatabase {
         skipped_rows   = excluded.skipped_rows,
         detected_paths = excluded.detected_paths
       ''',
-      [
-        source,
-        instance,
-        nowMs(),
-        error,
-        fileCount,
-        skipped,
-        jsonEncode(paths),
-      ],
+      [source, instance, nowMs(), error, fileCount, skipped, jsonEncode(paths)],
     );
   }
 
@@ -674,8 +705,7 @@ class AppDatabase {
       args.add(instance);
     }
     final whereSql = clauses.join(' AND ');
-    final rows = _db.select(
-      '''
+    final rows = _db.select('''
       SELECT
         COALESCE(SUM(input_tokens), 0) AS inp,
         COALESCE(SUM(output_tokens), 0) AS outp,
@@ -687,9 +717,7 @@ class AppDatabase {
         COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0) AS unpriced
       FROM usage_events
       WHERE $whereSql
-      ''',
-      args,
-    );
+      ''', args);
     return _breakdownFromRow(rows.first);
   }
 
@@ -739,11 +767,7 @@ class AppDatabase {
     return _breakdownFromRow(rows.first);
   }
 
-  TokenBreakdown sumRangeSources(
-    int fromMs,
-    int toMs,
-    List<String> sources,
-  ) {
+  TokenBreakdown sumRangeSources(int fromMs, int toMs, List<String> sources) {
     final todayStart = startOfLocalDay(nowMs());
     if (fromMs == todayStart) {
       final todayStr = _localDateString(todayStart);
@@ -794,10 +818,7 @@ class AppDatabase {
     final thisWeek = sumRollupDays(thisWeekStartStr, todayStr);
     final lastWeek = sumRollupDays(lastWeekStartStr, lastWeekEndStr);
     final range = sumRange(fromMs, toMs);
-    final perSource = groupStats(
-      'source',
-      UsageFilter(from: fromMs, to: toMs),
-    );
+    final perSource = groupStats('source', UsageFilter(from: fromMs, to: toMs));
 
     return OverviewStats(
       today: today,
@@ -819,7 +840,8 @@ class AppDatabase {
   }) {
     // Anti-Jank Rule 2: For day/week buckets grouped by source, model_norm, or total,
     // query `daily_rollup` first instead of scanning raw `usage_events`.
-    final canUseRollup = (bucket == 'day' || bucket == 'week') &&
+    final canUseRollup =
+        (bucket == 'day' || bucket == 'week') &&
         (groupBy == 'source' || groupBy == 'model_norm' || groupBy == 'total');
 
     if (canUseRollup) {
@@ -840,8 +862,7 @@ class AppDatabase {
         rollArgs.add(instance);
         extraClauses.add('AND instance = ?${rollArgs.length}');
       }
-      final rows = _db.select(
-        '''
+      final rows = _db.select('''
         SELECT
           day,
           $keyExpr AS grp_key,
@@ -857,9 +878,7 @@ class AppDatabase {
         WHERE day >= ?1 AND day <= ?2 ${extraClauses.join(' ')}
         GROUP BY day, grp_key
         ORDER BY day ASC
-        ''',
-        rollArgs,
-      );
+        ''', rollArgs);
 
       if (bucket == 'day') {
         return rows.map((r) {
@@ -881,19 +900,16 @@ class AppDatabase {
           final key = (r['grp_key'] as String?) ?? 'unknown';
           final cur = _breakdownFromRow(r);
           final prev = grouped[(weekStart, key)];
-          grouped[(weekStart, key)] = prev == null
-              ? cur
-              : _addBreakdowns(prev, cur);
+          grouped[(weekStart, key)] =
+              prev == null ? cur : _addBreakdowns(prev, cur);
         }
-        final entries = grouped.entries.toList()
-          ..sort((a, b) => a.key.$1.compareTo(b.key.$1));
+        final entries =
+            grouped.entries.toList()
+              ..sort((a, b) => a.key.$1.compareTo(b.key.$1));
         return entries
             .map(
-              (e) => SeriesPoint(
-                bucket: e.key.$1,
-                key: e.key.$2,
-                totals: e.value,
-              ),
+              (e) =>
+                  SeriesPoint(bucket: e.key.$1, key: e.key.$2, totals: e.value),
             )
             .toList();
       }
@@ -903,8 +919,7 @@ class AppDatabase {
       'hour' => '(ts_ms / 3600000) * 3600000',
       'week' =>
         "strftime('%s', date(ts_ms/1000, 'unixepoch', 'localtime', 'weekday 0', '-6 days')) * 1000",
-      _ =>
-        "strftime('%s', date(ts_ms/1000, 'unixepoch', 'localtime')) * 1000",
+      _ => "strftime('%s', date(ts_ms/1000, 'unixepoch', 'localtime')) * 1000",
     };
 
     final keyExpr = switch (groupBy) {
@@ -944,10 +959,7 @@ class AppDatabase {
       ORDER BY b ASC
     ''';
 
-    final rows = _db.select(
-      sql,
-      rawArgs,
-    );
+    final rows = _db.select(sql, rawArgs);
     return rows
         .map(
           (r) => SeriesPoint(
@@ -970,8 +982,7 @@ class AppDatabase {
     };
 
     final (whereSql, args) = _buildFilter(filter);
-    final rows = _db.select(
-      '''
+    final rows = _db.select('''
       SELECT
         $colExpr AS grp_key,
         SUM(input_tokens) AS inp,
@@ -986,9 +997,7 @@ class AppDatabase {
       $whereSql
       GROUP BY grp_key
       ORDER BY (SUM(input_tokens)+SUM(output_tokens)+SUM(cache_read_tokens)+SUM(cache_write_tokens)) DESC
-      ''',
-      args,
-    );
+      ''', args);
 
     var grandTotal = 0;
     final parsed = <(String, TokenBreakdown)>[];
@@ -1035,9 +1044,10 @@ class AppDatabase {
     final perInstance = groupStats('instance', allInstancesFilter);
 
     final sinceDay = _localDateString(nowMs() - 180 * 86400 * 1000);
-    final calRows = instance != null
-        ? _db.select(
-            '''
+    final calRows =
+        instance != null
+            ? _db.select(
+              '''
             SELECT day,
                    SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS t
             FROM daily_rollup
@@ -1045,10 +1055,10 @@ class AppDatabase {
             GROUP BY day
             ORDER BY day ASC
             ''',
-            [source, sinceDay, instance],
-          )
-        : _db.select(
-            '''
+              [source, sinceDay, instance],
+            )
+            : _db.select(
+              '''
             SELECT day,
                    SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS t
             FROM daily_rollup
@@ -1056,16 +1066,14 @@ class AppDatabase {
             GROUP BY day
             ORDER BY day ASC
             ''',
-            [source, sinceDay],
-          );
-    final calendar = calRows
-        .map(
-          (r) => CalendarPoint(
-            r['day'] as String,
-            (r['t'] as num).toInt(),
-          ),
-        )
-        .toList();
+              [source, sinceDay],
+            );
+    final calendar =
+        calRows
+            .map(
+              (r) => CalendarPoint(r['day'] as String, (r['t'] as num).toInt()),
+            )
+            .toList();
 
     return AgentStats(
       source: source,
@@ -1089,8 +1097,7 @@ class AppDatabase {
     );
     final total = (totalRows.first['c'] as num).toInt();
 
-    final dataRows = _db.select(
-      '''
+    final dataRows = _db.select('''
       SELECT id, ts_ms, source, surface, instance, provider, model, model_norm,
              project, session_id, input_tokens, output_tokens,
              cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd
@@ -1098,32 +1105,31 @@ class AppDatabase {
       $whereSql
       ORDER BY ts_ms DESC, id DESC
       LIMIT $safePageSize OFFSET $offset
-      ''',
-      args,
-    );
+      ''', args);
 
-    final rows = dataRows.map((r) {
-      final cost = (r['cost_usd'] as num?)?.toDouble();
-      return UsageRow(
-        id: (r['id'] as num).toInt(),
-        tsMs: (r['ts_ms'] as num).toInt(),
-        source: r['source'] as String,
-        surface: r['surface'] as String,
-        instance: r['instance'] as String,
-        provider: r['provider'] as String?,
-        model: r['model'] as String,
-        modelNorm: r['model_norm'] as String,
-        project: r['project'] as String?,
-        sessionId: (r['session_id'] as String?) ?? '',
-        inputTokens: (r['input_tokens'] as num?)?.toInt() ?? 0,
-        outputTokens: (r['output_tokens'] as num?)?.toInt() ?? 0,
-        cacheReadTokens: (r['cache_read_tokens'] as num?)?.toInt() ?? 0,
-        cacheWriteTokens: (r['cache_write_tokens'] as num?)?.toInt() ?? 0,
-        reasoningTokens: (r['reasoning_tokens'] as num?)?.toInt() ?? 0,
-        costUsd: cost,
-        unpriced: cost == null,
-      );
-    }).toList();
+    final rows =
+        dataRows.map((r) {
+          final cost = (r['cost_usd'] as num?)?.toDouble();
+          return UsageRow(
+            id: (r['id'] as num).toInt(),
+            tsMs: (r['ts_ms'] as num).toInt(),
+            source: r['source'] as String,
+            surface: r['surface'] as String,
+            instance: r['instance'] as String,
+            provider: r['provider'] as String?,
+            model: r['model'] as String,
+            modelNorm: r['model_norm'] as String,
+            project: r['project'] as String?,
+            sessionId: (r['session_id'] as String?) ?? '',
+            inputTokens: (r['input_tokens'] as num?)?.toInt() ?? 0,
+            outputTokens: (r['output_tokens'] as num?)?.toInt() ?? 0,
+            cacheReadTokens: (r['cache_read_tokens'] as num?)?.toInt() ?? 0,
+            cacheWriteTokens: (r['cache_write_tokens'] as num?)?.toInt() ?? 0,
+            reasoningTokens: (r['reasoning_tokens'] as num?)?.toInt() ?? 0,
+            costUsd: cost,
+            unpriced: cost == null,
+          );
+        }).toList();
 
     return Page<UsageRow>(
       rows: rows,
@@ -1135,8 +1141,7 @@ class AppDatabase {
 
   List<MonthlyStat> monthlyStats(UsageFilter filter) {
     final (whereSql, args) = _buildFilter(filter);
-    final rows = _db.select(
-      '''
+    final rows = _db.select('''
       SELECT
         strftime('%Y-%m', ts_ms / 1000, 'unixepoch', 'localtime') AS ym,
         source,
@@ -1152,9 +1157,7 @@ class AppDatabase {
       $whereSql
       GROUP BY ym, source
       ORDER BY ym DESC
-      ''',
-      args,
-    );
+      ''', args);
 
     final byMonth = <String, List<(String, TokenBreakdown)>>{};
     final monthOrder = <String>[];
@@ -1170,23 +1173,27 @@ class AppDatabase {
     }
 
     return monthOrder.map((month) {
-      final entries = byMonth[month]!
-        ..sort((a, b) => b.$2.totalTokens.compareTo(a.$2.totalTokens));
+      final entries =
+          byMonth[month]!
+            ..sort((a, b) => b.$2.totalTokens.compareTo(a.$2.totalTokens));
       var totals = const TokenBreakdown();
       for (final e in entries) {
         totals = _addBreakdowns(totals, e.$2);
       }
-      final bySource = entries.map((e) {
-        final share =
-            totals.totalTokens == 0 ? 0.0 : e.$2.totalTokens / totals.totalTokens;
-        return GroupStat(
-          key: e.$1,
-          label: e.$1,
-          totals: e.$2,
-          share: share,
-          unpriced: e.$2.unpricedEvents > 0,
-        );
-      }).toList();
+      final bySource =
+          entries.map((e) {
+            final share =
+                totals.totalTokens == 0
+                    ? 0.0
+                    : e.$2.totalTokens / totals.totalTokens;
+            return GroupStat(
+              key: e.$1,
+              label: e.$1,
+              totals: e.$2,
+              share: share,
+              unpriced: e.$2.unpricedEvents > 0,
+            );
+          }).toList();
       return MonthlyStat(month: month, totals: totals, bySource: bySource);
     }).toList();
   }
@@ -1231,15 +1238,16 @@ class AppDatabase {
       final cnt = counts[(src, kLocalInstance)] ?? (0, null);
       final lastErr = rec?['last_error'] as String?;
 
-      final status = !enabled
-          ? HealthStatus.disabled
-          : (lastErr != null && lastErr.isNotEmpty)
+      final status =
+          !enabled
+              ? HealthStatus.disabled
+              : (lastErr != null && lastErr.isNotEmpty)
               ? HealthStatus.error
               : detected.isEmpty
-                  ? HealthStatus.missing
-                  : isRealtime
-                      ? HealthStatus.live
-                      : HealthStatus.polling;
+              ? HealthStatus.missing
+              : isRealtime
+              ? HealthStatus.live
+              : HealthStatus.polling;
 
       List<String> paths = detected;
       if (paths.isEmpty && rec != null) {
@@ -1271,9 +1279,10 @@ class AppDatabase {
       final rec = recorded[(remote.agent, remote.name)];
       final cnt = counts[(remote.agent, remote.name)] ?? (0, null);
       final lastErr = rec?['last_error'] as String?;
-      final status = !remote.enabled
-          ? HealthStatus.disabled
-          : (lastErr != null && lastErr.isNotEmpty)
+      final status =
+          !remote.enabled
+              ? HealthStatus.disabled
+              : (lastErr != null && lastErr.isNotEmpty)
               ? HealthStatus.error
               : HealthStatus.polling;
 
@@ -1316,8 +1325,7 @@ class AppDatabase {
 
   String exportCsv(UsageFilter filter, String outPath) {
     final (whereSql, args) = _buildFilter(filter);
-    final rows = _db.select(
-      '''
+    final rows = _db.select('''
       SELECT ts_ms, source, surface, instance, COALESCE(provider,'') AS prov,
              model, model_norm, COALESCE(project,'') AS proj, session_id,
              input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
@@ -1325,9 +1333,7 @@ class AppDatabase {
       FROM usage_events
       $whereSql
       ORDER BY ts_ms DESC
-      ''',
-      args,
-    );
+      ''', args);
 
     final buf = StringBuffer();
     buf.writeln(
@@ -1336,8 +1342,11 @@ class AppDatabase {
     );
     for (final r in rows) {
       final ts = (r['ts_ms'] as num).toInt();
-      final iso = DateTime.fromMillisecondsSinceEpoch(ts, isUtc: true)
-          .toIso8601String();
+      final iso =
+          DateTime.fromMillisecondsSinceEpoch(
+            ts,
+            isUtc: true,
+          ).toIso8601String();
       final cost = (r['cost_usd'] as num?)?.toDouble();
       final costCell = cost != null ? cost.toStringAsFixed(6) : '';
       buf.writeln(
@@ -1356,13 +1365,51 @@ class AppDatabase {
   }
 
   String exportJson(UsageFilter filter, String outPath) {
-    final page = usageLog(filter, 0, 50000);
-    const encoder = JsonEncoder.withIndent('  ');
+    final (whereSql, args) = _buildFilter(filter);
+    final statement = _db.prepare('''
+      SELECT id, ts_ms, source, surface, instance, provider, model, model_norm,
+             project, session_id, input_tokens, output_tokens,
+             cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd
+      FROM usage_events $whereSql ORDER BY ts_ms DESC, id DESC
+    ''');
     final f = File(outPath);
     f.parent.createSync(recursive: true);
-    f.writeAsStringSync(
-      encoder.convert(page.rows.map((r) => r.toJson()).toList()),
-    );
+    final output = f.openSync(mode: FileMode.write);
+    try {
+      output.writeStringSync('[\n');
+      var first = true;
+      final cursor = statement.selectCursor(args);
+      while (cursor.moveNext()) {
+        final r = cursor.current;
+        final row = UsageRow(
+          id: (r['id'] as num).toInt(),
+          tsMs: (r['ts_ms'] as num).toInt(),
+          source: r['source'] as String,
+          surface: r['surface'] as String,
+          instance: r['instance'] as String,
+          provider: r['provider'] as String?,
+          model: r['model'] as String,
+          modelNorm: r['model_norm'] as String,
+          project: r['project'] as String?,
+          sessionId: r['session_id'] as String,
+          inputTokens: (r['input_tokens'] as num).toInt(),
+          outputTokens: (r['output_tokens'] as num).toInt(),
+          cacheReadTokens: (r['cache_read_tokens'] as num).toInt(),
+          cacheWriteTokens: (r['cache_write_tokens'] as num).toInt(),
+          reasoningTokens: (r['reasoning_tokens'] as num).toInt(),
+          costUsd: (r['cost_usd'] as num?)?.toDouble(),
+          unpriced: r['cost_usd'] == null,
+        );
+        if (!first) output.writeStringSync(',\n');
+        output.writeStringSync(jsonEncode(row.toJson()));
+        first = false;
+      }
+      output.writeStringSync('\n]\n');
+      output.flushSync();
+    } finally {
+      output.closeSync();
+      statement.dispose();
+    }
     return outPath;
   }
 
@@ -1378,10 +1425,22 @@ class AppDatabase {
   }
 
   static String _csvEscape(String s) {
-    if (s.contains(',') || s.contains('"') || s.contains('\n')) {
-      return '"${s.replaceAll('"', '""')}"';
+    final trimmed = s.trimLeft();
+    final isFormula = trimmed.isNotEmpty && '=+-@'.contains(trimmed[0]);
+    final safe =
+        isFormula ||
+                s.startsWith('\t') ||
+                s.startsWith('\r') ||
+                s.startsWith('\n')
+            ? "'$s"
+            : s;
+    if (safe.contains(',') ||
+        safe.contains('"') ||
+        safe.contains('\n') ||
+        safe.contains('\r')) {
+      return '"${safe.replaceAll('"', '""')}"';
     }
-    return s;
+    return safe;
   }
 
   // ----------------------------------------------------------------- secrets & remote
@@ -1394,10 +1453,9 @@ class AppDatabase {
   }
 
   Uint8List? getSecret(String key) {
-    final rows = _db.select(
-      'SELECT value FROM settings_kv WHERE key = ?1',
-      [key],
-    );
+    final rows = _db.select('SELECT value FROM settings_kv WHERE key = ?1', [
+      key,
+    ]);
     if (rows.isEmpty) return null;
     final val = rows.first['value'];
     if (val is Uint8List) return val;

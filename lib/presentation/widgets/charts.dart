@@ -89,31 +89,29 @@ class _SparklinePainter extends CustomPainter {
     fillPath.lineTo(last.dx, size.height);
     fillPath.close();
 
-    final fillPaint = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: [
-          color.withValues(alpha: 0.34),
-          color.withValues(alpha: 0.0),
-        ],
-      ).createShader(Offset.zero & size);
+    final fillPaint =
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              color.withValues(alpha: 0.34),
+              color.withValues(alpha: 0.0),
+            ],
+          ).createShader(Offset.zero & size);
     canvas.drawPath(fillPath, fillPaint);
 
-    final strokePaint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = strokeWidth
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
+    final strokePaint =
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = strokeWidth
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round;
     canvas.drawPath(path, strokePaint);
 
     // Glowing endpoint dot
-    canvas.drawCircle(
-      last,
-      3.0,
-      Paint()..color = color,
-    );
+    canvas.drawCircle(last, 3.0, Paint()..color = color);
   }
 
   @override
@@ -126,10 +124,7 @@ class _SparklinePainter extends CustomPainter {
 
 // ─── 2. Interactive UsageChart (Multi-Series Stacked Area & Curve Chart) ────
 
-enum UsageChartColorMode {
-  source,
-  palette,
-}
+enum UsageChartColorMode { source, palette }
 
 class _PivotedBucket {
   final int bucket;
@@ -151,6 +146,7 @@ class UsageChart extends StatefulWidget {
     this.colorBy = UsageChartColorMode.source,
     this.accentColor,
     this.height = 240,
+    this.bucket = 'day',
   });
 
   final List<SeriesPoint> points;
@@ -158,6 +154,9 @@ class UsageChart extends StatefulWidget {
   final UsageChartColorMode colorBy;
   final Color? accentColor;
   final double height;
+
+  /// Explicit query granularity: never infer it from sparse data points.
+  final String bucket;
 
   @override
   State<UsageChart> createState() => _UsageChartState();
@@ -208,8 +207,9 @@ class _UsageChartState extends State<UsageChart> {
       row[k] = (row[k] ?? 0.0) + v;
     }
 
-    final keys = keyTotals.keys.toList()
-      ..sort((a, b) => (keyTotals[b] ?? 0).compareTo(keyTotals[a] ?? 0));
+    final keys =
+        keyTotals.keys.toList()
+          ..sort((a, b) => (keyTotals[b] ?? 0).compareTo(keyTotals[a] ?? 0));
 
     final sortedBuckets = byBucket.keys.toList()..sort();
     final rows = <_PivotedBucket>[];
@@ -301,12 +301,12 @@ class _UsageChartState extends State<UsageChart> {
                       0.0,
                       plotW - 0.001,
                     );
-                    final idx = rows.length <= 1
-                        ? 0
-                        : ((relX / plotW) * (rows.length - 1)).round().clamp(
-                            0,
-                            rows.length - 1,
-                          );
+                    final idx =
+                        rows.length <= 1
+                            ? 0
+                            : ((relX / plotW) * (rows.length - 1))
+                                .round()
+                                .clamp(0, rows.length - 1);
                     if (_hoverIndex != idx) {
                       setState(() => _hoverIndex = idx);
                     }
@@ -325,6 +325,7 @@ class _UsageChartState extends State<UsageChart> {
                           keys: keys,
                           keyColors: keyColors,
                           showCost: widget.showCost,
+                          bucket: widget.bucket,
                           leftPad: leftPad,
                           gridColor: g.glassBorder,
                           labelColor: g.textTertiary,
@@ -367,11 +368,13 @@ class _UsageChartState extends State<UsageChart> {
   ) {
     final g = GlassTheme.of(context);
     final plotW = math.max(1.0, totalWidth - leftPad);
-    final xPos = leftPad + (count <= 1 ? plotW / 2 : (index / (count - 1)) * plotW);
+    final xPos =
+        leftPad + (count <= 1 ? plotW / 2 : (index / (count - 1)) * plotW);
     const cardW = 215.0;
-    final left = (xPos + 14 + cardW <= totalWidth)
-        ? xPos + 14
-        : math.max(leftPad + 4, xPos - cardW - 14);
+    final left =
+        (xPos + 14 + cardW <= totalWidth)
+            ? xPos + 14
+            : math.max(leftPad + 4, xPos - cardW - 14);
 
     final activeEntries = <MapEntry<String, double>>[
       for (final k in keys)
@@ -389,9 +392,7 @@ class _UsageChartState extends State<UsageChart> {
           width: cardW,
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
           decoration: BoxDecoration(
-            color: g.isDark
-                ? const Color(0xF0141826)
-                : const Color(0xF5FFFFFF),
+            color: g.isDark ? const Color(0xF0141826) : const Color(0xF5FFFFFF),
             borderRadius: BorderRadius.circular(10),
             border: Border.all(color: g.glassBorderStrong, width: 1),
             boxShadow: [
@@ -494,6 +495,7 @@ class _UsageChartPainter extends CustomPainter {
     required this.gridColor,
     required this.labelColor,
     required this.hoverIndex,
+    required this.bucket,
   });
 
   final List<_PivotedBucket> rows;
@@ -504,6 +506,7 @@ class _UsageChartPainter extends CustomPainter {
   final Color gridColor;
   final Color labelColor;
   final int? hoverIndex;
+  final String bucket;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -520,17 +523,17 @@ class _UsageChartPainter extends CustomPainter {
     );
 
     // Horizontal grid lines + Y-axis labels
-    final gridPaint = Paint()
-      ..color = gridColor
-      ..strokeWidth = 1;
+    final gridPaint =
+        Paint()
+          ..color = gridColor
+          ..strokeWidth = 1;
     for (var i = 0; i <= 3; i++) {
       final ratio = i / 3;
       final y = topPad + ratio * chartH;
       canvas.drawLine(Offset(leftPad, y), Offset(size.width, y), gridPaint);
 
       final tickVal = maxVal * (1.0 - ratio);
-      final tickText =
-          showCost ? fmtUsd(tickVal) : fmtTokens(tickVal.round());
+      final tickText = showCost ? fmtUsd(tickVal) : fmtTokens(tickVal.round());
       final tp = TextPainter(
         text: TextSpan(
           text: tickText,
@@ -547,8 +550,7 @@ class _UsageChartPainter extends CustomPainter {
     if (rows.isEmpty || keys.isEmpty) return;
 
     final n = rows.length;
-    double xAt(int i) =>
-        leftPad + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+    double xAt(int i) => leftPad + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
     double yForVal(double v) =>
         topPad + chartH - (v / maxVal).clamp(0.0, 1.0) * chartH;
 
@@ -589,10 +591,24 @@ class _UsageChartPainter extends CustomPainter {
           Offset(xAt(i), yForVal(cumulative[i][kIdx])),
       ];
 
+      // A moveTo-only path has no stroke or area. Sparse ranges with one
+      // occupied bucket must still display their data without hovering.
+      if (n == 1) {
+        canvas.drawLine(
+          bottomPoints.first,
+          topPoints.first,
+          Paint()
+            ..color = color.withValues(alpha: 0.35)
+            ..strokeWidth = 8,
+        );
+        canvas.drawCircle(topPoints.first, 4, Paint()..color = color);
+      }
+
       final linePath = Path()..moveTo(topPoints[0].dx, topPoints[0].dy);
-      final areaPath = Path()
-        ..moveTo(bottomPoints[0].dx, bottomPoints[0].dy)
-        ..lineTo(topPoints[0].dx, topPoints[0].dy);
+      final areaPath =
+          Path()
+            ..moveTo(bottomPoints[0].dx, bottomPoints[0].dy)
+            ..lineTo(topPoints[0].dx, topPoints[0].dy);
 
       for (var i = 1; i < n; i++) {
         final prev = topPoints[i - 1];
@@ -641,14 +657,15 @@ class _UsageChartPainter extends CustomPainter {
       final x = xAt(i);
       final tp = TextPainter(
         text: TextSpan(
-          text: AppFormat.date(rows[i].bucket),
+          text: chartBucketLabel(rows[i].bucket, bucket),
           style: TextStyle(fontSize: 10.5, color: labelColor),
         ),
         textDirection: TextDirection.ltr,
       )..layout();
-      final dx = (x - tp.width / 2)
-          .clamp(leftPad, math.max(leftPad, size.width - tp.width))
-          .toDouble();
+      final dx =
+          (x - tp.width / 2)
+              .clamp(leftPad, math.max(leftPad, size.width - tp.width))
+              .toDouble();
       tp.paint(canvas, Offset(dx, topPad + chartH + 6));
     }
 
@@ -679,18 +696,25 @@ class _UsageChartPainter extends CustomPainter {
     return oldDelegate.rows != rows ||
         oldDelegate.keys != keys ||
         oldDelegate.showCost != showCost ||
+        oldDelegate.bucket != bucket ||
+        !mapEquals(oldDelegate.keyColors, keyColors) ||
         oldDelegate.hoverIndex != hoverIndex;
   }
+}
+
+String chartBucketLabel(int timestamp, String bucket) {
+  if (bucket == 'hour') return AppFormat.time(timestamp);
+  if (bucket == 'month') {
+    final date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+    return '${date.year}-${date.month.toString().padLeft(2, '0')}';
+  }
+  return AppFormat.date(timestamp);
 }
 
 // ─── 3. CalendarHeatmap (GitHub-style Activity Grid) ────────────────────────
 
 class CalendarHeatmap extends StatelessWidget {
-  const CalendarHeatmap({
-    super.key,
-    required this.points,
-    this.accentColor,
-  });
+  const CalendarHeatmap({super.key, required this.points, this.accentColor});
 
   final List<CalendarPoint> points;
   final Color? accentColor;
@@ -699,8 +723,10 @@ class CalendarHeatmap extends StatelessWidget {
   Widget build(BuildContext context) {
     final g = GlassTheme.of(context);
     final color = accentColor ?? g.accentBlue;
-    final maxTokens =
-        points.fold<int>(1, (m, p) => p.tokens > m ? p.tokens : m);
+    final maxTokens = points.fold<int>(
+      1,
+      (m, p) => p.tokens > m ? p.tokens : m,
+    );
 
     final displayPoints =
         points.length > 182 ? points.sublist(points.length - 182) : points;
@@ -717,17 +743,15 @@ class CalendarHeatmap extends StatelessWidget {
                 width: 13,
                 height: 13,
                 decoration: BoxDecoration(
-                  color: pt.tokens <= 0
-                      ? g.glassSurface
-                      : color.withValues(
-                          alpha: (0.18 + 0.82 * (pt.tokens / maxTokens))
-                              .clamp(0.18, 1.0),
-                        ),
+                  color:
+                      pt.tokens <= 0
+                          ? g.glassSurface
+                          : color.withValues(
+                            alpha: (0.18 + 0.82 * (pt.tokens / maxTokens))
+                                .clamp(0.18, 1.0),
+                          ),
                   borderRadius: BorderRadius.circular(3.5),
-                  border: Border.all(
-                    color: g.glassBorder,
-                    width: 0.6,
-                  ),
+                  border: Border.all(color: g.glassBorder, width: 0.6),
                 ),
               ),
             ),
@@ -807,8 +831,10 @@ class _ShareRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final g = GlassTheme.of(context);
     final barColor = item.color ?? g.accentBlue;
-    final ratio = (item.share > 1.0 ? item.share / 100.0 : item.share)
-        .clamp(0.0, 1.0);
+    final ratio = (item.share > 1.0 ? item.share / 100.0 : item.share).clamp(
+      0.0,
+      1.0,
+    );
 
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,

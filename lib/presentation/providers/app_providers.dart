@@ -25,44 +25,28 @@ enum RangePreset {
     final endMs = now.millisecondsSinceEpoch;
     final startOfToday = DateTime(now.year, now.month, now.day);
     return switch (this) {
-      RangePreset.today => (
-          startOfToday.millisecondsSinceEpoch,
-          endMs,
-          'hour',
-        ),
+      RangePreset.today => (startOfToday.millisecondsSinceEpoch, endMs, 'hour'),
       RangePreset.d7 => (
-          startOfToday
-              .subtract(const Duration(days: 6))
-              .millisecondsSinceEpoch,
-          endMs,
-          'day',
-        ),
+        startOfToday.subtract(const Duration(days: 6)).millisecondsSinceEpoch,
+        endMs,
+        'day',
+      ),
       RangePreset.d14 => (
-          startOfToday
-              .subtract(const Duration(days: 13))
-              .millisecondsSinceEpoch,
-          endMs,
-          'day',
-        ),
+        startOfToday.subtract(const Duration(days: 13)).millisecondsSinceEpoch,
+        endMs,
+        'day',
+      ),
       RangePreset.d30 => (
-          startOfToday
-              .subtract(const Duration(days: 29))
-              .millisecondsSinceEpoch,
-          endMs,
-          'day',
-        ),
+        startOfToday.subtract(const Duration(days: 29)).millisecondsSinceEpoch,
+        endMs,
+        'day',
+      ),
       RangePreset.d90 => (
-          startOfToday
-              .subtract(const Duration(days: 89))
-              .millisecondsSinceEpoch,
-          endMs,
-          'day',
-        ),
-      RangePreset.all => (
-          0,
-          endMs,
-          'month',
-        ),
+        startOfToday.subtract(const Duration(days: 89)).millisecondsSinceEpoch,
+        endMs,
+        'day',
+      ),
+      RangePreset.all => (0, endMs, 'month'),
     };
   }
 }
@@ -82,7 +66,8 @@ class AgentRollupSummary {
 }
 
 String _resolveDefaultDataDir() {
-  final appData = Platform.environment['APPDATA'] ??
+  final appData =
+      Platform.environment['APPDATA'] ??
       Platform.environment['LOCALAPPDATA'] ??
       Directory.systemTemp.path;
   final dir = Directory(p.join(appData, 'com.glassusage.desktop'));
@@ -104,39 +89,37 @@ final activeRouteProvider = StateProvider<String>((ref) => 'dashboard');
 final isMiniCardModeProvider = StateProvider<bool>((ref) => false);
 
 /// Currently selected time range preset.
-final selectedRangeProvider =
-    StateProvider<RangePreset>((ref) => RangePreset.d7);
+final selectedRangeProvider = StateProvider<RangePreset>(
+  (ref) => RangePreset.d7,
+);
 
 /// 1 Hz Live telemetry rates. Watched ONLY by Odometer, Sparkline, header badge, and MiniCardView.
-final liveRatesProvider =
-    StateProvider<LiveRates>((ref) => const LiveRates());
+final liveRatesProvider = StateProvider<LiveRates>((ref) => const LiveRates());
 
 /// Current application settings.
-final appSettingsProvider =
-    StateProvider<AppSettings>((ref) => AppSettings());
+final appSettingsProvider = StateProvider<AppSettings>((ref) => AppSettings());
 
 /// Current overview statistics for selectedRangeProvider.
 final overviewStatsProvider = StateProvider<OverviewStats?>((ref) => null);
 
 /// Top models breakdown for selectedRangeProvider.
-final modelStatsProvider =
-    StateProvider<List<GroupStat>>((ref) => const []);
+final modelStatsProvider = StateProvider<List<GroupStat>>((ref) => const []);
 
 /// Top projects breakdown for selectedRangeProvider.
-final projectStatsProvider =
-    StateProvider<List<GroupStat>>((ref) => const []);
+final projectStatsProvider = StateProvider<List<GroupStat>>((ref) => const []);
 
 /// Provider breakdown for selectedRangeProvider.
-final providerStatsProvider =
-    StateProvider<List<GroupStat>>((ref) => const []);
+final providerStatsProvider = StateProvider<List<GroupStat>>((ref) => const []);
 
 /// Current time-series buckets for selectedRangeProvider.
-final seriesPointsProvider =
-    StateProvider<List<SeriesPoint>>((ref) => const []);
+final seriesPointsProvider = StateProvider<List<SeriesPoint>>(
+  (ref) => const [],
+);
 
 /// Current per-source & per-instance health list.
-final sourceHealthProvider =
-    StateProvider<List<SourceHealth>>((ref) => const []);
+final sourceHealthProvider = StateProvider<List<SourceHealth>>(
+  (ref) => const [],
+);
 
 /// Rolled-up 10-agent status list derived from sourceHealthProvider.
 final agentRollupProvider = Provider<List<AgentRollupSummary>>((ref) {
@@ -160,8 +143,9 @@ final filterOptionsProvider = StateProvider<FilterOptions>(
 );
 
 /// Configured remote SSH instances.
-final remoteInstancesProvider =
-    StateProvider<List<RemoteInstance>>((ref) => const []);
+final remoteInstancesProvider = StateProvider<List<RemoteInstance>>(
+  (ref) => const [],
+);
 
 /// Pricing catalog metadata and user overrides.
 final pricingInfoProvider = StateProvider<PricingInfo?>((ref) => null);
@@ -172,8 +156,9 @@ final cursorStatusProvider = StateProvider<CursorStatus>(
 );
 
 /// Application data directory path.
-final dataDirProvider =
-    StateProvider<String>((ref) => _resolveDefaultDataDir());
+final dataDirProvider = StateProvider<String>(
+  (ref) => _resolveDefaultDataDir(),
+);
 
 /// Whether a manual/initial scan is currently in progress.
 final isRescanningProvider = StateProvider<bool>((ref) => false);
@@ -204,6 +189,7 @@ class AppController {
   StreamSubscription<Map<String, dynamic>>? _sourceStatusSub;
   StreamSubscription<String>? _win32EventSub;
   bool _initialized = false;
+  int _rangeRequest = 0;
 
   UsageServiceClient? get client => _client;
 
@@ -311,6 +297,7 @@ class AppController {
   Future<void> refreshRangeData() async {
     final client = _client;
     if (client == null) return;
+    final request = ++_rangeRequest;
     final preset = ref.read(selectedRangeProvider);
     final (from, to, bucket) = preset.resolveBounds();
     final filter = UsageFilter(from: from, to: to);
@@ -329,12 +316,16 @@ class AppController {
       client.getFilterOptions(),
     ]);
 
+    if (request != _rangeRequest ||
+        _client != client ||
+        preset != ref.read(selectedRangeProvider)) {
+      return;
+    }
     ref.read(overviewStatsProvider.notifier).state =
         results[0] as OverviewStats;
     ref.read(seriesPointsProvider.notifier).state =
         results[1] as List<SeriesPoint>;
-    ref.read(modelStatsProvider.notifier).state =
-        results[2] as List<GroupStat>;
+    ref.read(modelStatsProvider.notifier).state = results[2] as List<GroupStat>;
     ref.read(projectStatsProvider.notifier).state =
         results[3] as List<GroupStat>;
     ref.read(providerStatsProvider.notifier).state =
@@ -439,7 +430,9 @@ class AppController {
   }
 
   Future<void> savePricingOverride(
-      String pattern, ModelPrice overridePrice) async {
+    String pattern,
+    ModelPrice overridePrice,
+  ) async {
     final client = _client;
     if (client == null) return;
     final current = ref.read(pricingInfoProvider)?.overrides ?? {};
@@ -464,12 +457,13 @@ class AppController {
     final updated = await client.upsertRemoteInstance(input);
     ref.read(remoteInstancesProvider.notifier).state = updated;
     await refreshSourcesAndRemotes();
-    unawaited(
-      syncRemoteInstance(input.name.trim()).catchError((_) => 0),
-    );
+    unawaited(syncRemoteInstance(input.name.trim()).catchError((_) => 0));
   }
 
-  Future<void> deleteRemoteInstance(String name, {bool purgeData = true}) async {
+  Future<void> deleteRemoteInstance(
+    String name, {
+    bool purgeData = true,
+  }) async {
     final client = _client;
     if (client == null) return;
     final updated = await client.deleteRemoteInstance(name, purgeData);
@@ -537,6 +531,7 @@ class AppController {
   }
 
   void dispose() {
+    _rangeRequest++;
     _liveSub?.cancel();
     _usageUpdatedSub?.cancel();
     _sourceStatusSub?.cancel();

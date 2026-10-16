@@ -71,15 +71,16 @@ class ModelPrice {
   });
 
   Map<String, dynamic> toJson() => {
-        'input_cost_per_token': inputCostPerToken,
-        'output_cost_per_token': outputCostPerToken,
-        'cache_creation_input_token_cost': cacheCreationInputTokenCost,
-        'cache_read_input_token_cost': cacheReadInputTokenCost,
-      };
+    'input_cost_per_token': inputCostPerToken,
+    'output_cost_per_token': outputCostPerToken,
+    'cache_creation_input_token_cost': cacheCreationInputTokenCost,
+    'cache_read_input_token_cost': cacheReadInputTokenCost,
+  };
 
   factory ModelPrice.fromJson(Map<String, dynamic> json) {
     return ModelPrice(
-      inputCostPerToken: (json['input_cost_per_token'] as num?)?.toDouble() ?? 0.0,
+      inputCostPerToken:
+          (json['input_cost_per_token'] as num?)?.toDouble() ?? 0.0,
       outputCostPerToken:
           (json['output_cost_per_token'] as num?)?.toDouble() ?? 0.0,
       cacheCreationInputTokenCost:
@@ -107,7 +108,9 @@ class PricingInfo {
 bool sourceHasNativeCost(String source) {
   return source == SourceIds.cursor ||
       source == SourceIds.hermes ||
-      source == SourceIds.pi;
+      source == SourceIds.pi ||
+      source == SourceIds.openclaw ||
+      source == SourceIds.opencode;
 }
 
 class PricingService {
@@ -119,8 +122,8 @@ class PricingService {
   String _sourceLabel = 'builtin';
 
   PricingService(String dataDir)
-      : cachePath = p.join(dataDir, 'pricing-cache.json'),
-        overridesPath = p.join(dataDir, 'pricing_overrides.json') {
+    : cachePath = p.join(dataDir, 'pricing-cache.json'),
+      overridesPath = p.join(dataDir, 'pricing_overrides.json') {
     _loadFromDisk();
   }
 
@@ -130,12 +133,12 @@ class PricingService {
     Map<String, ModelPrice>? overrides,
     Map<String, String>? aliases,
     required String tempDir,
-  })  : cachePath = p.join(tempDir, 'cache.json'),
-        overridesPath = p.join(tempDir, 'overrides.json'),
-        _prices = Map.from(prices),
-        _overrides = Map.from(overrides ?? const {}),
-        _aliases = Map.from(aliases ?? builtinAliases()),
-        _sourceLabel = 'test';
+  }) : cachePath = p.join(tempDir, 'cache.json'),
+       overridesPath = p.join(tempDir, 'overrides.json'),
+       _prices = Map.from(prices),
+       _overrides = Map.from(overrides ?? const {}),
+       _aliases = Map.from(aliases ?? builtinAliases()),
+       _sourceLabel = 'test';
 
   void _loadFromDisk() {
     _aliases = builtinAliases();
@@ -184,7 +187,9 @@ class PricingService {
         )
         .timeout(const Duration(seconds: 20));
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw HttpException('LiteLLM refresh returned HTTP ${response.statusCode}');
+      throw HttpException(
+        'LiteLLM refresh returned HTTP ${response.statusCode}',
+      );
     }
     final parsed = parseLiteLlm(response.body);
     if (parsed.isEmpty) {
@@ -228,10 +233,10 @@ class PricingService {
   Map<String, ModelPrice> get overrides => Map.unmodifiable(_overrides);
 
   PricingInfo get info => PricingInfo(
-        modelCount: _prices.length,
-        source: _sourceLabel,
-        overrides: overrides,
-      );
+    modelCount: _prices.length,
+    source: _sourceLabel,
+    overrides: overrides,
+  );
 
   /// Resolve a raw model string to the canonical billing name used for grouping.
   String normalize(String raw) {
@@ -414,24 +419,24 @@ class PricingService {
   }
 
   static Map<String, String> builtinAliases() => {
-        'gemini-pro-default': 'gemini-2.5-pro',
-        'gemini-pro-c': 'gemini-2.5-pro',
-        'gemini-pro-high': 'gemini-2.5-pro',
-        'gemini-flash-default': 'gemini-2.5-flash',
-        'gemini-3-flash-e': 'gemini-3-flash',
-        'gemini-3-flash-a': 'gemini-3-flash',
-        'gemini-3.1-pro-low': 'gemini-3-pro-preview',
-        'gemini-3.1-pro': 'gemini-3-pro-preview',
-        'claude-opus-4-6-thinking': 'claude-opus-4-1',
-        'claude-sonnet-4-5-thinking': 'claude-sonnet-4-5',
-        'claude-4-sonnet': 'claude-sonnet-4-20250514',
-        'claude-4-opus': 'claude-opus-4-20250514',
-        'gpt-5': 'gpt-5-2025-08-07',
-        'glm-latest': 'glm-5.2',
-        'auto': 'unknown',
-        'kimi-code/k3': 'kimi-k3',
-        'k3': 'kimi-k3',
-        'k3-256k': 'kimi-k3',
-        'deepseek-v4-flash': 'deepseek-chat',
-      };
+    'gemini-pro-default': 'gemini-2.5-pro',
+    'gemini-pro-c': 'gemini-2.5-pro',
+    'gemini-pro-high': 'gemini-2.5-pro',
+    'gemini-flash-default': 'gemini-2.5-flash',
+    'gemini-3-flash-e': 'gemini-3-flash',
+    'gemini-3-flash-a': 'gemini-3-flash',
+    'gemini-3.1-pro-low': 'gemini-3-pro-preview',
+    'gemini-3.1-pro': 'gemini-3-pro-preview',
+    'claude-opus-4-6-thinking': 'claude-opus-4-1',
+    'claude-sonnet-4-5-thinking': 'claude-sonnet-4-5',
+    'claude-4-sonnet': 'claude-sonnet-4-20250514',
+    'claude-4-opus': 'claude-opus-4-20250514',
+    'gpt-5': 'gpt-5-2025-08-07',
+    'glm-latest': 'glm-5.2',
+    'auto': 'unknown',
+    'kimi-code/k3': 'kimi-k3',
+    'k3': 'kimi-k3',
+    'k3-256k': 'kimi-k3',
+    'deepseek-v4-flash': 'deepseek-chat',
+  };
 }

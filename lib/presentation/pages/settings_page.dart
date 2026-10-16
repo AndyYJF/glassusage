@@ -4,19 +4,19 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
-import 'package:path/path.dart' as p;
 
 import '../../core/format/app_format.dart';
 import '../../core/i18n/app_i18n.dart';
 import '../../core/theme/glass_theme.dart';
 import '../../core/window/win32_bridge.dart';
 import '../../data/pricing/pricing_service.dart';
+import '../../data/updates/signed_update.dart';
 import '../../domain/models/settings_model.dart';
 import '../../domain/models/usage_models.dart';
 import '../providers/app_providers.dart';
 import '../widgets/glass_widgets.dart';
 
-const String kAppVersion = '0.7.6';
+const String kAppVersion = '0.7.7';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
@@ -34,14 +34,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   String? _cursorMessage;
 
   final TextEditingController _overridePatternCtrl = TextEditingController();
-  final TextEditingController _overrideInputCtrl =
-      TextEditingController(text: '3.0');
-  final TextEditingController _overrideOutputCtrl =
-      TextEditingController(text: '15.0');
-  final TextEditingController _overrideCacheReadCtrl =
-      TextEditingController(text: '0.3');
-  final TextEditingController _overrideCacheCreateCtrl =
-      TextEditingController(text: '3.75');
+  final TextEditingController _overrideInputCtrl = TextEditingController(
+    text: '3.0',
+  );
+  final TextEditingController _overrideOutputCtrl = TextEditingController(
+    text: '15.0',
+  );
+  final TextEditingController _overrideCacheReadCtrl = TextEditingController(
+    text: '0.3',
+  );
+  final TextEditingController _overrideCacheCreateCtrl = TextEditingController(
+    text: '3.75',
+  );
   bool _refreshingPricing = false;
   String? _syncingRemoteName;
 
@@ -98,8 +102,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       (ThemeModeSetting.light, i18n.t('settings.themeLight')),
                       (ThemeModeSetting.system, i18n.t('settings.themeSystem')),
                     ],
-                    onChanged: (v) =>
-                        controller.patchSettings({'theme': v.toJson()}),
+                    onChanged:
+                        (v) => controller.patchSettings({'theme': v.toJson()}),
                   ),
                 ),
                 const Divider(height: 22),
@@ -113,8 +117,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       (LocaleMode.en, 'English'),
                       (LocaleMode.zh, '中文'),
                     ],
-                    onChanged: (v) =>
-                        controller.patchSettings({'locale': v.toJson()}),
+                    onChanged:
+                        (v) => controller.patchSettings({'locale': v.toJson()}),
                   ),
                 ),
                 const Divider(height: 22),
@@ -131,8 +135,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       (WindowMaterial.mica, i18n.t('settings.materialMica')),
                       (WindowMaterial.css, i18n.t('settings.materialCss')),
                     ],
-                    onChanged: (v) =>
-                        controller.patchSettings({'material': v.toJson()}),
+                    onChanged:
+                        (v) =>
+                            controller.patchSettings({'material': v.toJson()}),
                   ),
                 ),
                 const Divider(height: 22),
@@ -166,22 +171,23 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 _ToggleRow(
                   label: i18n.t('settings.widgetAlwaysOnTop'),
                   value: settings.widgetAlwaysOnTop,
-                  onChanged: (v) =>
-                      controller.patchSettings({'widgetAlwaysOnTop': v}),
+                  onChanged:
+                      (v) => controller.patchSettings({'widgetAlwaysOnTop': v}),
                 ),
                 const SizedBox(height: 10),
                 _ToggleRow(
                   label: i18n.t('settings.widgetCompact'),
                   value: settings.widgetCompact,
-                  onChanged: (v) =>
-                      controller.patchSettings({'widgetCompact': v}),
+                  onChanged:
+                      (v) => controller.patchSettings({'widgetCompact': v}),
                 ),
                 const SizedBox(height: 10),
                 _ToggleRow(
                   label: i18n.t('settings.animatedBg'),
                   value: settings.animatedBackground,
-                  onChanged: (v) =>
-                      controller.patchSettings({'animatedBackground': v}),
+                  onChanged:
+                      (v) =>
+                          controller.patchSettings({'animatedBackground': v}),
                 ),
               ],
             ),
@@ -203,9 +209,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       ),
                     ),
                     StatusPill(
-                      status: cursorConfigured
-                          ? HealthStatus.live
-                          : HealthStatus.missing,
+                      status:
+                          cursorConfigured
+                              ? HealthStatus.live
+                              : HealthStatus.missing,
                       i18n: i18n,
                     ),
                   ],
@@ -224,11 +231,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                         child: TextField(
                           controller: _cursorTokenCtrl,
                           obscureText: true,
-                          style: TextStyle(fontSize: 12.5, color: g.textPrimary),
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            color: g.textPrimary,
+                          ),
                           decoration: InputDecoration(
-                            hintText: cursorConfigured
-                                ? '••••••••••••••••••••••••'
-                                : i18n.t('settings.cursorPlaceholder'),
+                            hintText:
+                                cursorConfigured
+                                    ? '••••••••••••••••••••••••'
+                                    : i18n.t('settings.cursorPlaceholder'),
                             hintStyle: TextStyle(
                               fontSize: 12,
                               color: g.textTertiary,
@@ -261,8 +272,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           _cursorMessage = null;
                         });
                         try {
-                          await controller
-                              .saveCursorToken(_cursorTokenCtrl.text.trim());
+                          await controller.saveCursorToken(
+                            _cursorTokenCtrl.text.trim(),
+                          );
                           _cursorTokenCtrl.clear();
                           if (mounted) {
                             setState(() {
@@ -330,13 +342,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       for (final r in remotes)
                         Builder(
                           builder: (context) {
-                            final health = allSources
-                                .where(
-                                  (h) =>
-                                      h.source == r.agent &&
-                                      h.instance == r.name,
-                                )
-                                .firstOrNull;
+                            final health =
+                                allSources
+                                    .where(
+                                      (h) =>
+                                          h.source == r.agent &&
+                                          h.instance == r.name,
+                                    )
+                                    .firstOrNull;
                             return Padding(
                               padding: const EdgeInsets.symmetric(vertical: 6),
                               child: Row(
@@ -384,8 +397,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                         if (health?.lastError != null &&
                                             health!.lastError!.isNotEmpty)
                                           Padding(
-                                            padding:
-                                                const EdgeInsets.only(top: 3),
+                                            padding: const EdgeInsets.only(
+                                              top: 3,
+                                            ),
                                             child: Text(
                                               health.lastError!,
                                               style: TextStyle(
@@ -402,24 +416,25 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                   GlassButton(
                                     label: i18n.t('settings.testConn'),
                                     compact: true,
-                                    onPressed: () => _runRemoteTest(
-                                      context,
-                                      input: RemoteInstanceInput(
-                                        name: r.name,
-                                        agent: r.agent,
-                                        host: r.host,
-                                        port: r.port,
-                                        username: r.username,
-                                        authMode: r.authMode,
-                                        keyPath: r.keyPath,
-                                        remoteHome: r.remoteHome,
-                                        remotePath: r.remotePath,
-                                        pollSecs: r.pollSecs,
-                                        importArchives: r.importArchives,
-                                        enabled: r.enabled,
-                                        proxyUrl: r.proxyUrl,
-                                      ),
-                                    ),
+                                    onPressed:
+                                        () => _runRemoteTest(
+                                          context,
+                                          input: RemoteInstanceInput(
+                                            name: r.name,
+                                            agent: r.agent,
+                                            host: r.host,
+                                            port: r.port,
+                                            username: r.username,
+                                            authMode: r.authMode,
+                                            keyPath: r.keyPath,
+                                            remoteHome: r.remoteHome,
+                                            remotePath: r.remotePath,
+                                            pollSecs: r.pollSecs,
+                                            importArchives: r.importArchives,
+                                            enabled: r.enabled,
+                                            proxyUrl: r.proxyUrl,
+                                          ),
+                                        ),
                                   ),
                                   const SizedBox(width: 6),
                                   GlassButton(
@@ -428,14 +443,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                     isLoading: _syncingRemoteName == r.name,
                                     onPressed: () async {
                                       setState(
-                                          () => _syncingRemoteName = r.name);
+                                        () => _syncingRemoteName = r.name,
+                                      );
                                       try {
-                                        await controller
-                                            .syncRemoteInstance(r.name);
+                                        await controller.syncRemoteInstance(
+                                          r.name,
+                                        );
                                       } finally {
                                         if (mounted) {
                                           setState(
-                                              () => _syncingRemoteName = null);
+                                            () => _syncingRemoteName = null,
+                                          );
                                         }
                                       }
                                     },
@@ -444,16 +462,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                   GlassButton(
                                     label: i18n.t('common.edit'),
                                     compact: true,
-                                    onPressed: () =>
-                                        _showRemoteDialog(context, existing: r),
+                                    onPressed:
+                                        () => _showRemoteDialog(
+                                          context,
+                                          existing: r,
+                                        ),
                                   ),
                                   const SizedBox(width: 6),
                                   GlassButton(
                                     label: i18n.t('common.delete'),
                                     variant: GlassButtonVariant.danger,
                                     compact: true,
-                                    onPressed: () =>
-                                        controller.deleteRemoteInstance(r.name),
+                                    onPressed:
+                                        () => controller.deleteRemoteInstance(
+                                          r.name,
+                                        ),
                                   ),
                                 ],
                               ),
@@ -591,8 +614,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                             label: i18n.t('common.delete'),
                             variant: GlassButtonVariant.danger,
                             compact: true,
-                            onPressed: () =>
-                                controller.deletePricingOverride(entry.key),
+                            onPressed:
+                                () =>
+                                    controller.deletePricingOverride(entry.key),
                           ),
                         ],
                       ),
@@ -872,15 +896,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                 port: int.tryParse(portCtrl.text.trim()) ?? 22,
                                 username: userCtrl.text.trim(),
                                 authMode: authMode,
-                                keyPath: keyPathCtrl.text.trim().isEmpty
-                                    ? null
-                                    : keyPathCtrl.text.trim(),
-                                password: passCtrl.text.isEmpty
-                                    ? null
-                                    : passCtrl.text,
-                                proxyUrl: proxyCtrl.text.trim().isEmpty
-                                    ? null
-                                    : proxyCtrl.text.trim(),
+                                keyPath:
+                                    keyPathCtrl.text.trim().isEmpty
+                                        ? null
+                                        : keyPathCtrl.text.trim(),
+                                password:
+                                    passCtrl.text.isEmpty
+                                        ? null
+                                        : passCtrl.text,
+                                proxyUrl:
+                                    proxyCtrl.text.trim().isEmpty
+                                        ? null
+                                        : proxyCtrl.text.trim(),
                                 enabled: true,
                               );
                               await ref
@@ -974,10 +1001,7 @@ class _ToggleRow extends StatelessWidget {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(
-          label,
-          style: TextStyle(fontSize: 13, color: g.textPrimary),
-        ),
+        Text(label, style: TextStyle(fontSize: 13, color: g.textPrimary)),
         Switch.adaptive(
           value: value,
           activeTrackColor: g.accentBlue,
@@ -1041,10 +1065,12 @@ class _UpdateCheckerCard extends StatefulWidget {
 }
 
 class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
-  String _state = 'idle'; // idle | checking | upToDate | available | downloading | error
+  String _state =
+      'idle'; // idle | checking | upToDate | available | downloading | error
   String? _remoteVersion;
   String? _releaseNotes;
   String? _downloadUrl;
+  String? _signature;
   String? _errorMsg;
   double _progress = 0.0;
 
@@ -1077,15 +1103,19 @@ class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
       String? version;
       String? notes;
       String? installerUrl;
+      String? signature;
 
       if (resp.statusCode == 200) {
-        final json = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+        final json =
+            jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
         version = (json['version'] as String?)?.trim();
         notes = json['notes'] as String?;
         final platforms = json['platforms'] as Map<String, dynamic>?;
-        final winEntry = (platforms?['windows-x86_64-nsis'] ??
-            platforms?['windows-x86_64']) as Map<String, dynamic>?;
+        final winEntry =
+            (platforms?['windows-x86_64-nsis'] ?? platforms?['windows-x86_64'])
+                as Map<String, dynamic>?;
         installerUrl = winEntry?['url'] as String?;
+        signature = winEntry?['signature'] as String?;
       } else {
         // Fallback to GitHub Releases REST API
         final ghResp = await http
@@ -1101,7 +1131,10 @@ class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
         }
         final ghJson =
             jsonDecode(utf8.decode(ghResp.bodyBytes)) as Map<String, dynamic>;
-        version = (ghJson['tag_name'] as String?)?.replaceFirst(RegExp(r'^v'), '');
+        version = (ghJson['tag_name'] as String?)?.replaceFirst(
+          RegExp(r'^v'),
+          '',
+        );
         notes = ghJson['body'] as String?;
         final assets = (ghJson['assets'] as List<dynamic>? ?? const []);
         for (final asset in assets) {
@@ -1113,6 +1146,15 @@ class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
             }
           }
         }
+        if (installerUrl != null) {
+          final sigResponse = await http
+              .get(updateDownloadUri('$installerUrl.sig'))
+              .timeout(const Duration(seconds: 15));
+          if (sigResponse.statusCode != 200) {
+            throw Exception('Signed update is unavailable');
+          }
+          signature = utf8.decode(sigResponse.bodyBytes).trim();
+        }
       }
 
       if (version == null || version.isEmpty) {
@@ -1121,11 +1163,16 @@ class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
 
       if (!mounted) return;
       if (_compareSemver(version, kAppVersion) > 0 && installerUrl != null) {
+        updateDownloadUri(installerUrl);
+        if (signature == null || signature.isEmpty) {
+          throw Exception('Missing update signature');
+        }
         setState(() {
           _state = 'available';
           _remoteVersion = version;
           _releaseNotes = notes;
           _downloadUrl = installerUrl;
+          _signature = signature;
         });
       } else {
         setState(() {
@@ -1144,8 +1191,8 @@ class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
 
   Future<void> _downloadAndInstall() async {
     final url = _downloadUrl;
-    final ver = _remoteVersion ?? 'latest';
-    if (url == null) return;
+    final signature = _signature;
+    if (url == null || signature == null) return;
 
     setState(() {
       _state = 'downloading';
@@ -1153,40 +1200,21 @@ class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
       _errorMsg = null;
     });
 
-    final client = http.Client();
     try {
-      final req = http.Request('GET', Uri.parse(url));
-      final streamed =
-          await client.send(req).timeout(const Duration(minutes: 5));
-      if (streamed.statusCode != 200) {
-        throw Exception('Download HTTP ${streamed.statusCode}');
-      }
-
-      final total = streamed.contentLength ?? 0;
-      var received = 0;
-      final outPath =
-          p.join(Directory.systemTemp.path, 'GlassUsage_${ver}_x64-setup.exe');
-      final outFile = File(outPath);
-      final sink = outFile.openWrite();
-
-      await for (final chunk in streamed.stream) {
-        sink.add(chunk);
-        received += chunk.length;
-        if (total > 0 && mounted) {
-          setState(() {
-            _progress = (received / total).clamp(0.0, 1.0);
-          });
-        }
-      }
-      await sink.flush();
-      await sink.close();
+      final outFile = await downloadSignedUpdate(
+        url,
+        signature,
+        onProgress: (progress) {
+          if (mounted) setState(() => _progress = progress.clamp(0.0, 1.0));
+        },
+      );
+      if (!mounted) return;
 
       // Launch NSIS installer in passive + auto-relaunch mode and exit current instance
-      await Process.start(
-        outFile.path,
-        const ['/P', '/R'],
-        mode: ProcessStartMode.detached,
-      );
+      await Process.start(outFile.path, const [
+        '/P',
+        '/R',
+      ], mode: ProcessStartMode.detached);
       exit(0);
     } catch (e) {
       if (!mounted) return;
@@ -1194,8 +1222,6 @@ class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
         _state = 'error';
         _errorMsg = e.toString();
       });
-    } finally {
-      client.close();
     }
   }
 
@@ -1221,10 +1247,7 @@ class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
           const SizedBox(height: 6),
           Text(
             i18n.t('settings.currentVersion', {'version': kAppVersion}),
-            style: GlassTheme.tabularStyle(
-              fontSize: 12,
-              color: g.textTertiary,
-            ),
+            style: GlassTheme.tabularStyle(fontSize: 12, color: g.textTertiary),
           ),
           const SizedBox(height: 12),
           if (_state == 'upToDate')
@@ -1257,10 +1280,9 @@ class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    i18n.t(
-                      'settings.updateAvailable',
-                      {'version': _remoteVersion ?? ''},
-                    ),
+                    i18n.t('settings.updateAvailable', {
+                      'version': _remoteVersion ?? '',
+                    }),
                     style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w700,
@@ -1311,13 +1333,15 @@ class _UpdateCheckerCardState extends State<_UpdateCheckerCard> {
               ),
             ),
           GlassButton(
-            label: _state == 'checking'
-                ? i18n.t('settings.checkingUpdate')
-                : i18n.t('settings.checkUpdate'),
+            label:
+                _state == 'checking'
+                    ? i18n.t('settings.checkingUpdate')
+                    : i18n.t('settings.checkUpdate'),
             icon: Icons.refresh_rounded,
-            onPressed: (_state == 'checking' || _state == 'downloading')
-                ? null
-                : _checkForUpdates,
+            onPressed:
+                (_state == 'checking' || _state == 'downloading')
+                    ? null
+                    : _checkForUpdates,
           ),
         ],
       ),

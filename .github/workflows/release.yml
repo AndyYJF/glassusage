@@ -72,14 +72,21 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Verify & build Windows Release
+      - name: Install Flutter dependencies
         if: steps.meta.outputs.should_release == 'true'
-        shell: pwsh
-        run: |
-          flutter pub get
-          flutter analyze
-          flutter test
-          flutter build windows --release
+        run: flutter pub get
+
+      - name: Analyze Dart code
+        if: steps.meta.outputs.should_release == 'true'
+        run: flutter analyze
+
+      - name: Run Flutter tests
+        if: steps.meta.outputs.should_release == 'true'
+        run: flutter test
+
+      - name: Build Windows Release
+        if: steps.meta.outputs.should_release == 'true'
+        run: flutter build windows --release
 
       - name: Package Portable ZIP, Signed NSIS Installer, latest.json & SHA256 Checksums
         if: steps.meta.outputs.should_release == 'true'

@@ -13,18 +13,16 @@ import '../live/live_tracker.dart';
 import '../pricing/pricing_service.dart';
 import 'ssh_client.dart';
 
-typedef SourceStatusCallback = void Function(
-  String source,
-  String instance,
-  HealthStatus status,
-  String? error,
-);
+typedef SourceStatusCallback =
+    void Function(
+      String source,
+      String instance,
+      HealthStatus status,
+      String? error,
+    );
 
-typedef UsageUpdatedCallback = void Function(
-  String source,
-  String instance,
-  int added,
-);
+typedef UsageUpdatedCallback =
+    void Function(String source, String instance, int added);
 
 String safeSnapshotPath(String snapshotDir, String relative) {
   if (relative.isEmpty ||
@@ -145,9 +143,12 @@ Future<void> downloadVerified(
       final conn = sqlite3.open(temp, mode: OpenMode.readOnly);
       try {
         final rows = conn.select('PRAGMA quick_check');
-        final check = rows.isEmpty ? '' : (rows.first.values.first as String? ?? '');
+        final check =
+            rows.isEmpty ? '' : (rows.first.values.first as String? ?? '');
         if (check != 'ok') {
-          throw StateError('downloaded SQLite snapshot failed quick_check: $check');
+          throw StateError(
+            'downloaded SQLite snapshot failed quick_check: $check',
+          );
         }
       } finally {
         conn.dispose();
@@ -196,9 +197,10 @@ Future<List<(String, String)>> enumerateRemoteFiles(
   final out = <(String, String)>[];
   switch (inst.agent) {
     case 'hermes':
-      final base = (inst.remotePath != null && inst.remotePath!.trim().isNotEmpty)
-          ? inst.remotePath!.trim()
-          : '$home/.hermes/state.db';
+      final base =
+          (inst.remotePath != null && inst.remotePath!.trim().isNotEmpty)
+              ? inst.remotePath!.trim()
+              : '$home/.hermes/state.db';
       if (await client.stat(base) != null) {
         out.add((base, 'state.db'));
       }
@@ -212,9 +214,10 @@ Future<List<(String, String)>> enumerateRemoteFiles(
       }
       break;
     case 'openclaw':
-      final root = (inst.remotePath != null && inst.remotePath!.trim().isNotEmpty)
-          ? inst.remotePath!.trim()
-          : '$home/.openclaw';
+      final root =
+          (inst.remotePath != null && inst.remotePath!.trim().isNotEmpty)
+              ? inst.remotePath!.trim()
+              : '$home/.openclaw';
       for (final agentId in await client.listDir('$root/agents')) {
         validateRemoteComponent(agentId);
         final agentDir = '$root/agents/$agentId/agent';
@@ -319,9 +322,12 @@ Future<int> syncRemoteInstance({
       final localPath = safeSnapshotPath(snapshotDir, localRel);
       final sqliteFile = isSqlitePath(localPath);
 
-      if (prev != null) {
+      // Main-file size/mtime do not reflect commits kept in SQLite's WAL.
+      // Always acquire a fresh consistent SQLite snapshot; only reuse logs.
+      if (prev != null && !sqliteFile) {
         final localFile = File(localPath);
-        final localOk = localFile.existsSync() &&
+        final localOk =
+            localFile.existsSync() &&
             (sqliteFile
                 ? localFile.lengthSync() > 0
                 : localFile.lengthSync() == size);
@@ -335,11 +341,7 @@ Future<int> syncRemoteInstance({
         inst.agent,
         inst.name,
         key,
-        ScanState(
-          offset: size,
-          mtimeMs: mtime * 1000,
-          extra: localRel,
-        ),
+        ScanState(offset: size, mtimeMs: mtime * 1000, extra: localRel),
       );
     }
 
@@ -482,9 +484,10 @@ Future<TestReport> testRemoteInstance({
         TestStep(
           label: 'Snapshot',
           ok: true,
-          detail: useBackup
-              ? 'pulled a consistent snapshot via sqlite3 .backup'
-              : 'sqlite3 not available on the host; copied the database with its WAL sidecars',
+          detail:
+              useBackup
+                  ? 'pulled a consistent snapshot via sqlite3 .backup'
+                  : 'sqlite3 not available on the host; copied the database with its WAL sidecars',
         ),
       );
     } catch (e) {

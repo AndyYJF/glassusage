@@ -52,6 +52,9 @@ class UsageEvent {
   int cacheWriteTokens;
   int reasoningTokens;
   double? costUsd;
+
+  /// Null for legacy callers; collectors set this before estimating a price.
+  bool? costIsNative;
   String dedupKey;
 
   UsageEvent({
@@ -71,6 +74,7 @@ class UsageEvent {
     this.cacheWriteTokens = 0,
     this.reasoningTokens = 0,
     this.costUsd,
+    this.costIsNative,
   });
 
   /// Billable token total. `reasoningTokens` is a subset of `outputTokens` across all
@@ -96,6 +100,7 @@ class UsageEvent {
     int? cacheWriteTokens,
     int? reasoningTokens,
     double? costUsd,
+    bool? costIsNative,
     String? dedupKey,
   }) {
     return UsageEvent(
@@ -114,6 +119,7 @@ class UsageEvent {
       cacheWriteTokens: cacheWriteTokens ?? this.cacheWriteTokens,
       reasoningTokens: reasoningTokens ?? this.reasoningTokens,
       costUsd: costUsd ?? this.costUsd,
+      costIsNative: costIsNative ?? this.costIsNative,
       dedupKey: dedupKey ?? this.dedupKey,
     );
   }
@@ -124,11 +130,7 @@ class ScanState {
   final int mtimeMs;
   final String? extra;
 
-  const ScanState({
-    this.offset = 0,
-    this.mtimeMs = 0,
-    this.extra,
-  });
+  const ScanState({this.offset = 0, this.mtimeMs = 0, this.extra});
 }
 
 class PendingScanState {
@@ -212,33 +214,32 @@ class SourceHealth {
   }
 
   Map<String, dynamic> toJson() => {
-        'source': source,
-        'instance': instance,
-        'status': status.toJson(),
-        'detectedPaths': detectedPaths,
-        'fileCount': fileCount,
-        'eventCount': eventCount,
-        'lastScanMs': lastScanMs,
-        'lastEventMs': lastEventMs,
-        'lastError': lastError,
-        'skippedRows': skippedRows,
-      };
+    'source': source,
+    'instance': instance,
+    'status': status.toJson(),
+    'detectedPaths': detectedPaths,
+    'fileCount': fileCount,
+    'eventCount': eventCount,
+    'lastScanMs': lastScanMs,
+    'lastEventMs': lastEventMs,
+    'lastError': lastError,
+    'skippedRows': skippedRows,
+  };
 
   factory SourceHealth.fromJson(Map<String, dynamic> json) => SourceHealth(
-        source: json['source'] as String? ?? '',
-        instance: json['instance'] as String? ?? kLocalInstance,
-        status: HealthStatus.fromJson(json['status'] as String?),
-        detectedPaths: (json['detectedPaths'] as List?)
-                ?.map((e) => e.toString())
-                .toList() ??
-            const [],
-        fileCount: (json['fileCount'] as num?)?.toInt() ?? 0,
-        eventCount: (json['eventCount'] as num?)?.toInt() ?? 0,
-        lastScanMs: (json['lastScanMs'] as num?)?.toInt(),
-        lastEventMs: (json['lastEventMs'] as num?)?.toInt(),
-        lastError: json['lastError'] as String?,
-        skippedRows: (json['skippedRows'] as num?)?.toInt() ?? 0,
-      );
+    source: json['source'] as String? ?? '',
+    instance: json['instance'] as String? ?? kLocalInstance,
+    status: HealthStatus.fromJson(json['status'] as String?),
+    detectedPaths:
+        (json['detectedPaths'] as List?)?.map((e) => e.toString()).toList() ??
+        const [],
+    fileCount: (json['fileCount'] as num?)?.toInt() ?? 0,
+    eventCount: (json['eventCount'] as num?)?.toInt() ?? 0,
+    lastScanMs: (json['lastScanMs'] as num?)?.toInt(),
+    lastEventMs: (json['lastEventMs'] as num?)?.toInt(),
+    lastError: json['lastError'] as String?,
+    skippedRows: (json['skippedRows'] as num?)?.toInt() ?? 0,
+  );
 }
 
 class TokenBreakdown {
@@ -270,16 +271,16 @@ class TokenBreakdown {
   }
 
   Map<String, dynamic> toJson() => {
-        'inputTokens': inputTokens,
-        'outputTokens': outputTokens,
-        'cacheReadTokens': cacheReadTokens,
-        'cacheWriteTokens': cacheWriteTokens,
-        'reasoningTokens': reasoningTokens,
-        'totalTokens': totalTokens,
-        'costUsd': costUsd,
-        'events': events,
-        'unpricedEvents': unpricedEvents,
-      };
+    'inputTokens': inputTokens,
+    'outputTokens': outputTokens,
+    'cacheReadTokens': cacheReadTokens,
+    'cacheWriteTokens': cacheWriteTokens,
+    'reasoningTokens': reasoningTokens,
+    'totalTokens': totalTokens,
+    'costUsd': costUsd,
+    'events': events,
+    'unpricedEvents': unpricedEvents,
+  };
 
   factory TokenBreakdown.fromJson(Map<String, dynamic> json) {
     final inp = (json['inputTokens'] as num?)?.toInt() ?? 0;
@@ -323,16 +324,16 @@ class SeriesPoint {
   double get costUsd => totals.costUsd;
 
   Map<String, dynamic> toJson() => {
-        'bucket': bucket,
-        'key': key,
-        ...totals.toJson(),
-      };
+    'bucket': bucket,
+    'key': key,
+    ...totals.toJson(),
+  };
 
   factory SeriesPoint.fromJson(Map<String, dynamic> json) => SeriesPoint(
-        bucket: (json['bucket'] as num?)?.toInt() ?? 0,
-        key: json['key'] as String? ?? 'total',
-        totals: TokenBreakdown.fromJson(json),
-      );
+    bucket: (json['bucket'] as num?)?.toInt() ?? 0,
+    key: json['key'] as String? ?? 'total',
+    totals: TokenBreakdown.fromJson(json),
+  );
 }
 
 class UsageRow {
@@ -378,44 +379,44 @@ class UsageRow {
       inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'tsMs': tsMs,
-        'source': source,
-        'surface': surface,
-        'instance': instance,
-        'provider': provider,
-        'model': model,
-        'modelNorm': modelNorm,
-        'project': project,
-        'sessionId': sessionId,
-        'inputTokens': inputTokens,
-        'outputTokens': outputTokens,
-        'cacheReadTokens': cacheReadTokens,
-        'cacheWriteTokens': cacheWriteTokens,
-        'reasoningTokens': reasoningTokens,
-        'costUsd': costUsd,
-        'unpriced': unpriced,
-      };
+    'id': id,
+    'tsMs': tsMs,
+    'source': source,
+    'surface': surface,
+    'instance': instance,
+    'provider': provider,
+    'model': model,
+    'modelNorm': modelNorm,
+    'project': project,
+    'sessionId': sessionId,
+    'inputTokens': inputTokens,
+    'outputTokens': outputTokens,
+    'cacheReadTokens': cacheReadTokens,
+    'cacheWriteTokens': cacheWriteTokens,
+    'reasoningTokens': reasoningTokens,
+    'costUsd': costUsd,
+    'unpriced': unpriced,
+  };
 
   factory UsageRow.fromJson(Map<String, dynamic> json) => UsageRow(
-        id: (json['id'] as num?)?.toInt() ?? 0,
-        tsMs: (json['tsMs'] as num?)?.toInt() ?? 0,
-        source: json['source'] as String? ?? '',
-        surface: json['surface'] as String? ?? '',
-        instance: json['instance'] as String? ?? kLocalInstance,
-        provider: json['provider'] as String?,
-        model: json['model'] as String? ?? '',
-        modelNorm: json['modelNorm'] as String? ?? '',
-        project: json['project'] as String?,
-        sessionId: json['sessionId'] as String? ?? '',
-        inputTokens: (json['inputTokens'] as num?)?.toInt() ?? 0,
-        outputTokens: (json['outputTokens'] as num?)?.toInt() ?? 0,
-        cacheReadTokens: (json['cacheReadTokens'] as num?)?.toInt() ?? 0,
-        cacheWriteTokens: (json['cacheWriteTokens'] as num?)?.toInt() ?? 0,
-        reasoningTokens: (json['reasoningTokens'] as num?)?.toInt() ?? 0,
-        costUsd: (json['costUsd'] as num?)?.toDouble(),
-        unpriced: json['unpriced'] as bool? ?? (json['costUsd'] == null),
-      );
+    id: (json['id'] as num?)?.toInt() ?? 0,
+    tsMs: (json['tsMs'] as num?)?.toInt() ?? 0,
+    source: json['source'] as String? ?? '',
+    surface: json['surface'] as String? ?? '',
+    instance: json['instance'] as String? ?? kLocalInstance,
+    provider: json['provider'] as String?,
+    model: json['model'] as String? ?? '',
+    modelNorm: json['modelNorm'] as String? ?? '',
+    project: json['project'] as String?,
+    sessionId: json['sessionId'] as String? ?? '',
+    inputTokens: (json['inputTokens'] as num?)?.toInt() ?? 0,
+    outputTokens: (json['outputTokens'] as num?)?.toInt() ?? 0,
+    cacheReadTokens: (json['cacheReadTokens'] as num?)?.toInt() ?? 0,
+    cacheWriteTokens: (json['cacheWriteTokens'] as num?)?.toInt() ?? 0,
+    reasoningTokens: (json['reasoningTokens'] as num?)?.toInt() ?? 0,
+    costUsd: (json['costUsd'] as num?)?.toDouble(),
+    unpriced: json['unpriced'] as bool? ?? (json['costUsd'] == null),
+  );
 }
 
 class UsageFilter {
@@ -468,28 +469,26 @@ class UsageFilter {
   }
 
   Map<String, dynamic> toJson() => {
-        'from': from,
-        'to': to,
-        'sources': sources,
-        'instances': instances,
-        'providers': providers,
-        'models': models,
-        'search': search,
-        'unpricedOnly': unpricedOnly,
-      };
+    'from': from,
+    'to': to,
+    'sources': sources,
+    'instances': instances,
+    'providers': providers,
+    'models': models,
+    'search': search,
+    'unpricedOnly': unpricedOnly,
+  };
 
   factory UsageFilter.fromJson(Map<String, dynamic> json) => UsageFilter(
-        from: (json['from'] as num?)?.toInt(),
-        to: (json['to'] as num?)?.toInt(),
-        sources: (json['sources'] as List?)?.map((e) => e.toString()).toList(),
-        instances:
-            (json['instances'] as List?)?.map((e) => e.toString()).toList(),
-        providers:
-            (json['providers'] as List?)?.map((e) => e.toString()).toList(),
-        models: (json['models'] as List?)?.map((e) => e.toString()).toList(),
-        search: json['search'] as String?,
-        unpricedOnly: json['unpricedOnly'] as bool?,
-      );
+    from: (json['from'] as num?)?.toInt(),
+    to: (json['to'] as num?)?.toInt(),
+    sources: (json['sources'] as List?)?.map((e) => e.toString()).toList(),
+    instances: (json['instances'] as List?)?.map((e) => e.toString()).toList(),
+    providers: (json['providers'] as List?)?.map((e) => e.toString()).toList(),
+    models: (json['models'] as List?)?.map((e) => e.toString()).toList(),
+    search: json['search'] as String?,
+    unpricedOnly: json['unpricedOnly'] as bool?,
+  );
 }
 
 class GroupStat {
@@ -512,28 +511,28 @@ class GroupStat {
   int get events => totals.events;
 
   GroupStat copyWith({String? label}) => GroupStat(
-        key: key,
-        label: label ?? this.label,
-        totals: totals,
-        share: share,
-        unpriced: unpriced,
-      );
+    key: key,
+    label: label ?? this.label,
+    totals: totals,
+    share: share,
+    unpriced: unpriced,
+  );
 
   Map<String, dynamic> toJson() => {
-        'key': key,
-        'label': label,
-        ...totals.toJson(),
-        'share': share,
-        'unpriced': unpriced,
-      };
+    'key': key,
+    'label': label,
+    ...totals.toJson(),
+    'share': share,
+    'unpriced': unpriced,
+  };
 
   factory GroupStat.fromJson(Map<String, dynamic> json) => GroupStat(
-        key: json['key'] as String? ?? '',
-        label: json['label'] as String? ?? '',
-        totals: TokenBreakdown.fromJson(json),
-        share: (json['share'] as num?)?.toDouble() ?? 0.0,
-        unpriced: json['unpriced'] as bool? ?? false,
-      );
+    key: json['key'] as String? ?? '',
+    label: json['label'] as String? ?? '',
+    totals: TokenBreakdown.fromJson(json),
+    share: (json['share'] as num?)?.toDouble() ?? 0.0,
+    unpriced: json['unpriced'] as bool? ?? false,
+  );
 }
 
 class MonthlyStat {
@@ -548,10 +547,10 @@ class MonthlyStat {
   });
 
   Map<String, dynamic> toJson() => {
-        'month': month,
-        ...totals.toJson(),
-        'bySource': bySource.map((s) => s.toJson()).toList(),
-      };
+    'month': month,
+    ...totals.toJson(),
+    'bySource': bySource.map((s) => s.toJson()).toList(),
+  };
 }
 
 class Page<T> {
@@ -568,20 +567,21 @@ class Page<T> {
   });
 
   Map<String, dynamic> toJson(Map<String, dynamic> Function(T) itemToJson) => {
-        'rows': rows.map(itemToJson).toList(),
-        'total': total,
-        'page': page,
-        'pageSize': pageSize,
-      };
+    'rows': rows.map(itemToJson).toList(),
+    'total': total,
+    'page': page,
+    'pageSize': pageSize,
+  };
 
   factory Page.fromJson(
     Map<String, dynamic> json,
     T Function(Map<String, dynamic>) itemFromJson,
   ) {
     return Page(
-      rows: (json['rows'] as List? ?? const [])
-          .map((e) => itemFromJson((e as Map).cast<String, dynamic>()))
-          .toList(),
+      rows:
+          (json['rows'] as List? ?? const [])
+              .map((e) => itemFromJson((e as Map).cast<String, dynamic>()))
+              .toList(),
       total: (json['total'] as num?)?.toInt() ?? 0,
       page: (json['page'] as num?)?.toInt() ?? 0,
       pageSize: (json['pageSize'] as num?)?.toInt() ?? 50,
@@ -607,34 +607,35 @@ class OverviewStats {
   });
 
   Map<String, dynamic> toJson() => {
-        'today': today.toJson(),
-        'yesterday': yesterday.toJson(),
-        'thisWeek': thisWeek.toJson(),
-        'lastWeek': lastWeek.toJson(),
-        'range': range.toJson(),
-        'perSource': perSource.map((e) => e.toJson()).toList(),
-      };
+    'today': today.toJson(),
+    'yesterday': yesterday.toJson(),
+    'thisWeek': thisWeek.toJson(),
+    'lastWeek': lastWeek.toJson(),
+    'range': range.toJson(),
+    'perSource': perSource.map((e) => e.toJson()).toList(),
+  };
 
   factory OverviewStats.fromJson(Map<String, dynamic> json) => OverviewStats(
-        today: TokenBreakdown.fromJson(
-          (json['today'] as Map?)?.cast<String, dynamic>() ?? const {},
-        ),
-        yesterday: TokenBreakdown.fromJson(
-          (json['yesterday'] as Map?)?.cast<String, dynamic>() ?? const {},
-        ),
-        thisWeek: TokenBreakdown.fromJson(
-          (json['thisWeek'] as Map?)?.cast<String, dynamic>() ?? const {},
-        ),
-        lastWeek: TokenBreakdown.fromJson(
-          (json['lastWeek'] as Map?)?.cast<String, dynamic>() ?? const {},
-        ),
-        range: TokenBreakdown.fromJson(
-          (json['range'] as Map?)?.cast<String, dynamic>() ?? const {},
-        ),
-        perSource: (json['perSource'] as List? ?? const [])
+    today: TokenBreakdown.fromJson(
+      (json['today'] as Map?)?.cast<String, dynamic>() ?? const {},
+    ),
+    yesterday: TokenBreakdown.fromJson(
+      (json['yesterday'] as Map?)?.cast<String, dynamic>() ?? const {},
+    ),
+    thisWeek: TokenBreakdown.fromJson(
+      (json['thisWeek'] as Map?)?.cast<String, dynamic>() ?? const {},
+    ),
+    lastWeek: TokenBreakdown.fromJson(
+      (json['lastWeek'] as Map?)?.cast<String, dynamic>() ?? const {},
+    ),
+    range: TokenBreakdown.fromJson(
+      (json['range'] as Map?)?.cast<String, dynamic>() ?? const {},
+    ),
+    perSource:
+        (json['perSource'] as List? ?? const [])
             .map((e) => GroupStat.fromJson((e as Map).cast<String, dynamic>()))
             .toList(),
-      );
+  );
 }
 
 class CalendarPoint {
@@ -662,35 +663,39 @@ class AgentStats {
   });
 
   Map<String, dynamic> toJson() => {
-        'source': source,
-        'totals': totals.toJson(),
-        'perModel': perModel.map((e) => e.toJson()).toList(),
-        'perProject': perProject.map((e) => e.toJson()).toList(),
-        'perInstance': perInstance.map((e) => e.toJson()).toList(),
-        'calendar': calendar.map((c) => [c.day, c.tokens]).toList(),
-      };
+    'source': source,
+    'totals': totals.toJson(),
+    'perModel': perModel.map((e) => e.toJson()).toList(),
+    'perProject': perProject.map((e) => e.toJson()).toList(),
+    'perInstance': perInstance.map((e) => e.toJson()).toList(),
+    'calendar': calendar.map((c) => [c.day, c.tokens]).toList(),
+  };
 
   factory AgentStats.fromJson(Map<String, dynamic> json) => AgentStats(
-        source: json['source'] as String? ?? '',
-        totals: TokenBreakdown.fromJson(
-          (json['totals'] as Map?)?.cast<String, dynamic>() ?? const {},
-        ),
-        perModel: (json['perModel'] as List? ?? const [])
+    source: json['source'] as String? ?? '',
+    totals: TokenBreakdown.fromJson(
+      (json['totals'] as Map?)?.cast<String, dynamic>() ?? const {},
+    ),
+    perModel:
+        (json['perModel'] as List? ?? const [])
             .map((e) => GroupStat.fromJson((e as Map).cast<String, dynamic>()))
             .toList(),
-        perProject: (json['perProject'] as List? ?? const [])
+    perProject:
+        (json['perProject'] as List? ?? const [])
             .map((e) => GroupStat.fromJson((e as Map).cast<String, dynamic>()))
             .toList(),
-        perInstance: (json['perInstance'] as List? ?? const [])
+    perInstance:
+        (json['perInstance'] as List? ?? const [])
             .map((e) => GroupStat.fromJson((e as Map).cast<String, dynamic>()))
             .toList(),
-        calendar: (json['calendar'] as List? ?? const []).map((c) {
+    calendar:
+        (json['calendar'] as List? ?? const []).map((c) {
           if (c is List && c.length >= 2) {
             return CalendarPoint(c[0].toString(), (c[1] as num).toInt());
           }
           return const CalendarPoint('', 0);
         }).toList(),
-      );
+  );
 }
 
 class LiveSource {
@@ -709,20 +714,20 @@ class LiveSource {
   });
 
   Map<String, dynamic> toJson() => {
-        'source': source,
-        'rpm': rpm,
-        'tpm': tpm,
-        'active': active,
-        'polling': polling,
-      };
+    'source': source,
+    'rpm': rpm,
+    'tpm': tpm,
+    'active': active,
+    'polling': polling,
+  };
 
   factory LiveSource.fromJson(Map<String, dynamic> json) => LiveSource(
-        source: json['source'] as String? ?? '',
-        rpm: (json['rpm'] as num?)?.toDouble() ?? 0.0,
-        tpm: (json['tpm'] as num?)?.toDouble() ?? 0.0,
-        active: json['active'] as bool? ?? false,
-        polling: json['polling'] as bool? ?? false,
-      );
+    source: json['source'] as String? ?? '',
+    rpm: (json['rpm'] as num?)?.toDouble() ?? 0.0,
+    tpm: (json['tpm'] as num?)?.toDouble() ?? 0.0,
+    active: json['active'] as bool? ?? false,
+    polling: json['polling'] as bool? ?? false,
+  );
 }
 
 class LiveRates {
@@ -769,30 +774,32 @@ class LiveRates {
   }
 
   Map<String, dynamic> toJson() => {
-        'rpm': rpm,
-        'tpm': tpm,
-        'costToday': costToday,
-        'tokensToday': tokensToday,
-        'perSource': perSource.map((e) => e.toJson()).toList(),
-        'spark60': spark60,
-        'budgetCostToday': budgetCostToday,
-        'budgetTokensToday': budgetTokensToday,
-      };
+    'rpm': rpm,
+    'tpm': tpm,
+    'costToday': costToday,
+    'tokensToday': tokensToday,
+    'perSource': perSource.map((e) => e.toJson()).toList(),
+    'spark60': spark60,
+    'budgetCostToday': budgetCostToday,
+    'budgetTokensToday': budgetTokensToday,
+  };
 
   factory LiveRates.fromJson(Map<String, dynamic> json) => LiveRates(
-        rpm: (json['rpm'] as num?)?.toDouble() ?? 0.0,
-        tpm: (json['tpm'] as num?)?.toDouble() ?? 0.0,
-        costToday: (json['costToday'] as num?)?.toDouble() ?? 0.0,
-        tokensToday: (json['tokensToday'] as num?)?.toInt() ?? 0,
-        perSource: (json['perSource'] as List? ?? const [])
+    rpm: (json['rpm'] as num?)?.toDouble() ?? 0.0,
+    tpm: (json['tpm'] as num?)?.toDouble() ?? 0.0,
+    costToday: (json['costToday'] as num?)?.toDouble() ?? 0.0,
+    tokensToday: (json['tokensToday'] as num?)?.toInt() ?? 0,
+    perSource:
+        (json['perSource'] as List? ?? const [])
             .map((e) => LiveSource.fromJson((e as Map).cast<String, dynamic>()))
             .toList(),
-        spark60: (json['spark60'] as List? ?? const [])
+    spark60:
+        (json['spark60'] as List? ?? const [])
             .map((e) => (e as num).toInt())
             .toList(),
-        budgetCostToday: (json['budgetCostToday'] as num?)?.toDouble() ?? 0.0,
-        budgetTokensToday: (json['budgetTokensToday'] as num?)?.toInt() ?? 0,
-      );
+    budgetCostToday: (json['budgetCostToday'] as num?)?.toDouble() ?? 0.0,
+    budgetTokensToday: (json['budgetTokensToday'] as num?)?.toInt() ?? 0,
+  );
 }
 
 class DeltaEvent {
@@ -817,10 +824,7 @@ class IngestOutcome {
   final int changed;
   final List<DeltaEvent> deltas;
 
-  const IngestOutcome({
-    this.changed = 0,
-    this.deltas = const [],
-  });
+  const IngestOutcome({this.changed = 0, this.deltas = const []});
 }
 
 class FilterOptions {
@@ -837,26 +841,26 @@ class FilterOptions {
   });
 
   Map<String, dynamic> toJson() => {
-        'source': source,
-        'provider': provider,
-        'modelNorm': modelNorm,
-        'instance': instance,
-      };
+    'source': source,
+    'provider': provider,
+    'modelNorm': modelNorm,
+    'instance': instance,
+  };
 
   factory FilterOptions.fromJson(Map<String, dynamic> json) => FilterOptions(
-        source:
-            (json['source'] as List?)?.map((e) => e.toString()).toList() ??
-                const [],
-        provider:
-            (json['provider'] as List?)?.map((e) => e.toString()).toList() ??
-                const [],
-        modelNorm:
-            (json['modelNorm'] as List?)?.map((e) => e.toString()).toList() ??
-                const [],
-        instance:
-            (json['instance'] as List?)?.map((e) => e.toString()).toList() ??
-                const [],
-      );
+    source:
+        (json['source'] as List?)?.map((e) => e.toString()).toList() ??
+        const [],
+    provider:
+        (json['provider'] as List?)?.map((e) => e.toString()).toList() ??
+        const [],
+    modelNorm:
+        (json['modelNorm'] as List?)?.map((e) => e.toString()).toList() ??
+        const [],
+    instance:
+        (json['instance'] as List?)?.map((e) => e.toString()).toList() ??
+        const [],
+  );
 }
 
 class CursorStatus {
@@ -871,16 +875,16 @@ class CursorStatus {
   });
 
   Map<String, dynamic> toJson() => {
-        'hasAccessToken': hasAccessToken,
-        'hasCookie': hasCookie,
-        'lastError': lastError,
-      };
+    'hasAccessToken': hasAccessToken,
+    'hasCookie': hasCookie,
+    'lastError': lastError,
+  };
 
   factory CursorStatus.fromJson(Map<String, dynamic> json) => CursorStatus(
-        hasAccessToken: json['hasAccessToken'] as bool? ?? false,
-        hasCookie: json['hasCookie'] as bool? ?? false,
-        lastError: json['lastError'] as String?,
-      );
+    hasAccessToken: json['hasAccessToken'] as bool? ?? false,
+    hasCookie: json['hasCookie'] as bool? ?? false,
+    lastError: json['lastError'] as String?,
+  );
 }
 
 class RemoteInstance {
@@ -946,38 +950,38 @@ class RemoteInstance {
   }
 
   Map<String, dynamic> toJson() => {
-        'name': name,
-        'agent': agent,
-        'host': host,
-        'port': port,
-        'username': username,
-        'authMode': authMode,
-        'keyPath': keyPath,
-        'remoteHome': remoteHome,
-        'remotePath': remotePath,
-        'pollSecs': pollSecs,
-        'importArchives': importArchives,
-        'enabled': enabled,
-        'hasSecret': hasSecret,
-        'proxyUrl': proxyUrl,
-      };
+    'name': name,
+    'agent': agent,
+    'host': host,
+    'port': port,
+    'username': username,
+    'authMode': authMode,
+    'keyPath': keyPath,
+    'remoteHome': remoteHome,
+    'remotePath': remotePath,
+    'pollSecs': pollSecs,
+    'importArchives': importArchives,
+    'enabled': enabled,
+    'hasSecret': hasSecret,
+    'proxyUrl': proxyUrl,
+  };
 
   factory RemoteInstance.fromJson(Map<String, dynamic> json) => RemoteInstance(
-        name: json['name'] as String? ?? '',
-        agent: json['agent'] as String? ?? 'hermes',
-        host: json['host'] as String? ?? '',
-        port: (json['port'] as num?)?.toInt() ?? 22,
-        username: json['username'] as String? ?? '',
-        authMode: json['authMode'] as String? ?? 'key',
-        keyPath: json['keyPath'] as String?,
-        remoteHome: json['remoteHome'] as String?,
-        remotePath: json['remotePath'] as String?,
-        pollSecs: (json['pollSecs'] as num?)?.toInt() ?? 300,
-        importArchives: json['importArchives'] as bool? ?? false,
-        enabled: json['enabled'] as bool? ?? true,
-        hasSecret: json['hasSecret'] as bool? ?? false,
-        proxyUrl: json['proxyUrl'] as String?,
-      );
+    name: json['name'] as String? ?? '',
+    agent: json['agent'] as String? ?? 'hermes',
+    host: json['host'] as String? ?? '',
+    port: (json['port'] as num?)?.toInt() ?? 22,
+    username: json['username'] as String? ?? '',
+    authMode: json['authMode'] as String? ?? 'key',
+    keyPath: json['keyPath'] as String?,
+    remoteHome: json['remoteHome'] as String?,
+    remotePath: json['remotePath'] as String?,
+    pollSecs: (json['pollSecs'] as num?)?.toInt() ?? 300,
+    importArchives: json['importArchives'] as bool? ?? false,
+    enabled: json['enabled'] as bool? ?? true,
+    hasSecret: json['hasSecret'] as bool? ?? false,
+    proxyUrl: json['proxyUrl'] as String?,
+  );
 }
 
 class RemoteInstanceInput {
@@ -1032,7 +1036,8 @@ class RemoteInstanceInput {
     }
     final stem = trimmedName.split('.').first.toUpperCase();
     const reservedNames = {'CON', 'PRN', 'AUX', 'NUL'};
-    final reservedPort = stem.length == 4 &&
+    final reservedPort =
+        stem.length == 4 &&
         (stem.startsWith('COM') || stem.startsWith('LPT')) &&
         RegExp(r'^[1-9]$').hasMatch(stem[3]);
     if (reservedNames.contains(stem) || reservedPort) {
@@ -1073,7 +1078,8 @@ class RemoteInstanceInput {
       }
       final rest = proxy.substring('http://'.length).split('/').first;
       final parts = rest.split(':');
-      final validProxy = parts.length == 2 &&
+      final validProxy =
+          parts.length == 2 &&
           parts.every(
             (p) => p.isNotEmpty && RegExp(r'^[A-Za-z0-9.\-]+$').hasMatch(p),
           );
@@ -1108,21 +1114,21 @@ class RemoteInstanceInput {
       toRemoteInstance(hasExistingSecret: hasExistingSecret);
 
   Map<String, dynamic> toJson() => {
-        'name': name,
-        'agent': agent,
-        'host': host,
-        'port': port,
-        'username': username,
-        'authMode': authMode,
-        'keyPath': keyPath,
-        'password': password,
-        'remoteHome': remoteHome,
-        'remotePath': remotePath,
-        'pollSecs': pollSecs,
-        'importArchives': importArchives,
-        'enabled': enabled,
-        'proxyUrl': proxyUrl,
-      };
+    'name': name,
+    'agent': agent,
+    'host': host,
+    'port': port,
+    'username': username,
+    'authMode': authMode,
+    'keyPath': keyPath,
+    'password': password,
+    'remoteHome': remoteHome,
+    'remotePath': remotePath,
+    'pollSecs': pollSecs,
+    'importArchives': importArchives,
+    'enabled': enabled,
+    'proxyUrl': proxyUrl,
+  };
 
   factory RemoteInstanceInput.fromJson(Map<String, dynamic> json) =>
       RemoteInstanceInput(
@@ -1148,43 +1154,33 @@ class TestStep {
   final bool ok;
   final String detail;
 
-  const TestStep({
-    required this.label,
-    required this.ok,
-    required this.detail,
-  });
+  const TestStep({required this.label, required this.ok, required this.detail});
 
-  Map<String, dynamic> toJson() => {
-        'label': label,
-        'ok': ok,
-        'detail': detail,
-      };
+  Map<String, dynamic> toJson() => {'label': label, 'ok': ok, 'detail': detail};
 
   factory TestStep.fromJson(Map<String, dynamic> json) => TestStep(
-        label: json['label'] as String? ?? '',
-        ok: json['ok'] as bool? ?? false,
-        detail: json['detail'] as String? ?? '',
-      );
+    label: json['label'] as String? ?? '',
+    ok: json['ok'] as bool? ?? false,
+    detail: json['detail'] as String? ?? '',
+  );
 }
 
 class TestReport {
   final bool ok;
   final List<TestStep> steps;
 
-  const TestReport({
-    required this.ok,
-    required this.steps,
-  });
+  const TestReport({required this.ok, required this.steps});
 
   Map<String, dynamic> toJson() => {
-        'ok': ok,
-        'steps': steps.map((s) => s.toJson()).toList(),
-      };
+    'ok': ok,
+    'steps': steps.map((s) => s.toJson()).toList(),
+  };
 
   factory TestReport.fromJson(Map<String, dynamic> json) => TestReport(
-        ok: json['ok'] as bool? ?? false,
-        steps: (json['steps'] as List? ?? const [])
+    ok: json['ok'] as bool? ?? false,
+    steps:
+        (json['steps'] as List? ?? const [])
             .map((s) => TestStep.fromJson((s as Map).cast<String, dynamic>()))
             .toList(),
-      );
+  );
 }

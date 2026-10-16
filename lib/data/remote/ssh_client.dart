@@ -7,6 +7,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:path/path.dart' as p;
 
 import '../../domain/models/usage_models.dart';
+import 'ssh_host_keys.dart';
 
 const int _kConnectTimeoutSecs = 10;
 const Duration _kCommandTimeout = Duration(seconds: 120);
@@ -42,14 +43,34 @@ class AppSshClient {
       throw StateError('SSH password is required for password authentication');
     }
     final socket = await _connectSocket();
+    Object? hostKeyError;
     final client = SSHClient(
       socket,
       username: instance.username,
+      onVerifyHostKey: (type, fingerprint) {
+        try {
+          return SshHostKeys(knownHostsPath).verify(
+            instance.host,
+            instance.port,
+            type,
+            utf8.decode(fingerprint),
+          );
+        } catch (error) {
+          hostKeyError = error;
+          return false;
+        }
+      },
       onPasswordRequest: () => pwd,
     );
-    await client.authenticated.timeout(
-      const Duration(seconds: _kConnectTimeoutSecs),
-    );
+    try {
+      await client.authenticated.timeout(
+        const Duration(seconds: _kConnectTimeoutSecs),
+      );
+    } catch (_) {
+      client.close();
+      if (hostKeyError != null) throw hostKeyError!;
+      rethrow;
+    }
     _passwordClient = client;
     return client;
   }
@@ -129,11 +150,20 @@ class AppSshClient {
       },
       onDone: () {
         dataController.close();
+        if (!completer.isCompleted) {
+          completer.completeError(
+            StateError('Proxy closed before CONNECT response'),
+          );
+        }
       },
     );
 
     return completer.future.timeout(
       const Duration(seconds: _kConnectTimeoutSecs),
+      onTimeout: () {
+        rawSocket.destroy();
+        throw TimeoutException('SSH proxy CONNECT timed out');
+      },
     );
   }
 
@@ -160,16 +190,27 @@ class AppSshClient {
   Future<String> exec(String remoteCommand) async {
     if (usesPassword) {
       final client = await _getPasswordClient();
-      final res = await client.run(remoteCommand).timeout(_kCommandTimeout);
-      return utf8.decode(res, allowMalformed: true);
+      try {
+        final res = await client
+            .runWithResult(remoteCommand)
+            .timeout(_kCommandTimeout);
+        if (res.exitCode != 0) {
+          throw StateError(
+            'SSH command exited with ${res.exitCode ?? res.exitSignal ?? "no status"}: '
+            '${utf8.decode(res.stderr, allowMalformed: true).trim()}',
+          );
+        }
+        return utf8.decode(res.stdout, allowMalformed: true);
+      } on TimeoutException {
+        // Future.timeout alone does not terminate the underlying SSH command.
+        close();
+        rethrow;
+      }
     }
 
     final program = _locate('ssh.exe');
     final args = [..._sshArgs(), _target, remoteCommand];
-    final res = await Process.run(
-      program,
-      args,
-    ).timeout(_kCommandTimeout);
+    final res = await Process.run(program, args).timeout(_kCommandTimeout);
     if (res.exitCode != 0) {
       throw StateError(
         'ssh exited with ${res.exitCode}: ${(res.stderr as String).trim()}',
@@ -284,7 +325,8 @@ class AppSshClient {
     if (useBackup) {
       final seq = _snapshotSeq++;
       final tmp = '/tmp/glassusage-snap-$pid-$seq.db';
-      final cmd = "rm -f $tmp && sqlite3 ${shellQuote(remoteDb)} \".backup '$tmp'\"";
+      final cmd =
+          "rm -f $tmp && sqlite3 ${shellQuote(remoteDb)} \".backup '$tmp'\"";
       try {
         await exec(cmd);
         try {

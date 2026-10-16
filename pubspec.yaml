@@ -1,7 +1,7 @@
 name: glassusage
 description: "Real-time token usage monitor for local AI coding agents, with an Apple Liquid Glass UI."
 publish_to: 'none'
-version: 0.7.6+1
+version: 0.7.7+1
 
 environment:
   sdk: ^3.7.0
@@ -17,6 +17,8 @@ dependencies:
   path: ^1.9.1
   http: ^1.3.0
   crypto: ^3.0.6
+  pinenacl: ^0.6.0
+  pointycastle: ^4.0.0
   watcher: ^1.1.1
   intl: any
   ffi: ^2.1.4
