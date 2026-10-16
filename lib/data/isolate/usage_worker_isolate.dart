@@ -133,7 +133,7 @@ class _UsageWorkerEngine {
     // to complete immediately (< 20ms) before running background scans & LiteLLM refresh.
     Timer(const Duration(milliseconds: 350), () async {
       _setupWatchers();
-      await scanAll();
+      await scanAll(includeLiveDeltas: false);
       _tickRemoteScheduler();
       unawaited(_syncCursorNow());
       try {
@@ -328,6 +328,7 @@ class _UsageWorkerEngine {
     String sourceId, {
     String? rootOverride,
     List<PendingScanState>? extraStates,
+    bool includeLiveDeltas = true,
   }) {
     if (_scanBusy) return;
     final collector = collectorById(sourceId);
@@ -356,7 +357,7 @@ class _UsageWorkerEngine {
         collector.writeMode,
         states,
       );
-      live.push(outcome.deltas);
+      if (includeLiveDeltas) live.push(outcome.deltas);
       outputSpeeds.observe(report.outputSpeeds, source: sourceId,
           instance: instance, isRealtime: collector.isRealtime && rootOverride == null);
       store.recordStatus(
@@ -388,9 +389,9 @@ class _UsageWorkerEngine {
     }
   }
 
-  Future<void> scanAll() async {
+  Future<void> scanAll({bool includeLiveDeltas = true}) async {
     for (final collector in allCollectors()) {
-      runScan(collector.id);
+      runScan(collector.id, includeLiveDeltas: includeLiveDeltas);
       await Future<void>.delayed(Duration.zero);
     }
     final settings = settingsStore.get();
@@ -413,7 +414,7 @@ class _UsageWorkerEngine {
           collector.writeMode,
           report.states,
         );
-        live.push(outcome.deltas);
+        if (includeLiveDeltas) live.push(outcome.deltas);
         store.recordStatus(
           inst.agent,
           inst.name,
@@ -660,13 +661,13 @@ class _UsageWorkerEngine {
         if (source == SourceIds.cursor) {
           await _syncCursorNow();
         } else {
-          runScan(source);
+          runScan(source, includeLiveDeltas: false);
         }
         return getSourceHealth().map((h) => h.toJson()).toList();
 
       case 'rescan_all':
         _invalidateDetectCache();
-        await scanAll();
+        await scanAll(includeLiveDeltas: false);
         await _syncCursorNow();
         return getSourceHealth().map((h) => h.toJson()).toList();
 
