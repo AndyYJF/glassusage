@@ -2,6 +2,7 @@
 
 #include <dwmapi.h>
 #include <flutter_windows.h>
+#include <uxtheme.h>
 
 #include "resource.h"
 
@@ -140,8 +141,13 @@ bool Win32Window::Create(const std::wstring& title,
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
   double scale_factor = dpi / 96.0;
 
+  // Omit WS_SYSMENU so Windows 11 DWM does not composite native Minimize /
+  // Maximize / Close caption glyphs over our custom Flutter titlebar or MiniCard.
+  constexpr DWORD kBorderlessStyle =
+      WS_OVERLAPPED | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+
   HWND window = CreateWindow(
-      window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
+      window_class, title.c_str(), kBorderlessStyle,
       Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
       Scale(size.width, scale_factor), Scale(size.height, scale_factor),
       nullptr, nullptr, GetModuleHandle(nullptr), this);
@@ -149,6 +155,12 @@ bool Win32Window::Create(const std::wstring& title,
   if (!window) {
     return false;
   }
+
+  WTA_OPTIONS wta_opts{};
+  wta_opts.dwFlags = WTNCA_NODRAWCAPTION | WTNCA_NODRAWICON |
+                     WTNCA_NOSYSMENU | WTNCA_NOMIRRORHELP;
+  wta_opts.dwMask = WTNCA_VALIDBITS;
+  SetWindowThemeAttribute(window, WTA_NONCLIENT, &wta_opts, sizeof(wta_opts));
 
   UpdateTheme(window);
 
@@ -209,10 +221,12 @@ Win32Window::MessageHandler(HWND hwnd,
             params->rgrc[0] = monitor_info.rcWork;
           }
         }
-        return 0;
       }
-      break;
+      return 0;
     }
+
+    case WM_NCACTIVATE:
+      return DefWindowProc(window_handle_, message, wparam, -1);
 
     case WM_DESTROY:
       window_handle_ = nullptr;
