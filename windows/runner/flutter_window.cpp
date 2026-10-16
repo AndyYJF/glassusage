@@ -45,36 +45,6 @@ bool FlutterWindow::OnCreate() {
           &flutter::StandardMethodCodec::GetInstance());
 
   HWND hwnd = GetHandle();
-  win32_channel_->SetMethodCallHandler(
-      [this, hwnd](const flutter::MethodCall<flutter::EncodableValue>& call,
-                   std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
-                       result) {
-        const std::string& method = call.method_name();
-        if (method == "quitApp") {
-          allow_quit_ = true;
-          RemoveTrayAndHotkey(hwnd);
-          DestroyWindow(hwnd);
-          result->Success(flutter::EncodableValue(true));
-        } else if (method == "hideToTray") {
-          ShowWindow(hwnd, SW_HIDE);
-          NotifyDartEvent("window:hidden");
-          result->Success(flutter::EncodableValue(true));
-        } else if (method == "showMainWindow") {
-          ShowWindow(hwnd, SW_SHOW);
-          if (IsIconic(hwnd)) {
-            ShowWindow(hwnd, SW_RESTORE);
-          }
-          SetForegroundWindow(hwnd);
-          NotifyDartEvent("window:visible");
-          result->Success(flutter::EncodableValue(true));
-        } else if (method == "getHwnd") {
-          result->Success(
-              flutter::EncodableValue(static_cast<int64_t>(
-                  reinterpret_cast<intptr_t>(hwnd))));
-        } else {
-          result->NotImplemented();
-        }
-      });
 
   SetupTrayAndHotkey(hwnd);
 
@@ -133,19 +103,9 @@ void FlutterWindow::ShowTrayContextMenu(HWND hwnd) {
 
   switch (cmd) {
     case kMenuIdOpen:
-      ShowWindow(hwnd, SW_SHOW);
-      if (IsIconic(hwnd)) {
-        ShowWindow(hwnd, SW_RESTORE);
-      }
-      SetForegroundWindow(hwnd);
       NotifyDartEvent("tray:open");
       break;
     case kMenuIdWidget:
-      ShowWindow(hwnd, SW_SHOW);
-      if (IsIconic(hwnd)) {
-        ShowWindow(hwnd, SW_RESTORE);
-      }
-      SetForegroundWindow(hwnd);
       NotifyDartEvent("tray:widget");
       break;
     case kMenuIdRescan:
@@ -182,10 +142,6 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
-  if (message == WM_NCCALCSIZE || message == WM_NCACTIVATE) {
-    return Win32Window::MessageHandler(hwnd, message, wparam, lparam);
-  }
-
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =
@@ -212,11 +168,6 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case kWmTrayIcon: {
       UINT mouse_msg = LOWORD(lparam);
       if (mouse_msg == WM_LBUTTONUP || mouse_msg == WM_LBUTTONDBLCLK) {
-        ShowWindow(hwnd, SW_SHOW);
-        if (IsIconic(hwnd)) {
-          ShowWindow(hwnd, SW_RESTORE);
-        }
-        SetForegroundWindow(hwnd);
         NotifyDartEvent("tray:open");
         return 0;
       } else if (mouse_msg == WM_RBUTTONUP || mouse_msg == WM_CONTEXTMENU) {
@@ -231,11 +182,6 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
           NotifyDartEvent("hotkey:toggle");
         } else {
-          ShowWindow(hwnd, SW_SHOW);
-          if (IsIconic(hwnd)) {
-            ShowWindow(hwnd, SW_RESTORE);
-          }
-          SetForegroundWindow(hwnd);
           NotifyDartEvent("tray:open");
         }
         return 0;

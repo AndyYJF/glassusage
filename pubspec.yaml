@@ -25,6 +25,9 @@ dependencies:
   win32: ^5.10.1
   dartssh2: ^2.11.0
   archive: ^4.0.4
+  window_manager: 0.5.2
+  flutter_acrylic: ^1.1.4
+  screen_retriever: 0.2.2
 
 dev_dependencies:
   flutter_test:

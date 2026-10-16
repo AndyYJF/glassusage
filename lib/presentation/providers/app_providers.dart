@@ -6,7 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import '../../core/i18n/app_i18n.dart';
-import '../../core/window/win32_bridge.dart';
+import '../../core/window/desktop_window_manager.dart';
 import '../../data/isolate/usage_service_client.dart';
 import '../../data/pricing/pricing_service.dart';
 import '../../domain/models/settings_model.dart';
@@ -197,7 +197,9 @@ class AppController {
     if (_initialized) return;
     _initialized = true;
 
-    _win32EventSub = Win32Bridge.instance.events.listen(_handleWin32Event);
+    _win32EventSub = DesktopWindowManager.instance.events.listen(
+      _handleWin32Event,
+    );
 
     final dataDir = ref.read(dataDirProvider);
     final client = UsageServiceClient(dataDir: dataDir);
@@ -263,6 +265,7 @@ class AppController {
         refreshRangeData();
         break;
       case 'tray:open':
+        unawaited(DesktopWindowManager.instance.showMainWindow());
         ref.read(isWindowVisibleProvider.notifier).state = true;
         if (ref.read(isMiniCardModeProvider)) {
           setWidgetMode(false);
@@ -270,6 +273,7 @@ class AppController {
         refreshRangeData();
         break;
       case 'tray:widget':
+        unawaited(DesktopWindowManager.instance.showMainWindow());
         ref.read(isWindowVisibleProvider.notifier).state = true;
         setWidgetMode(!ref.read(isMiniCardModeProvider));
         break;
@@ -277,6 +281,7 @@ class AppController {
         rescanNow();
         break;
       case 'hotkey:toggle':
+        unawaited(DesktopWindowManager.instance.showMainWindow());
         ref.read(isWindowVisibleProvider.notifier).state = true;
         setWidgetMode(!ref.read(isMiniCardModeProvider));
         break;
@@ -291,7 +296,12 @@ class AppController {
       ThemeModeSetting.light => false,
       ThemeModeSetting.system => brightness == Brightness.dark,
     };
-    Win32Bridge.instance.applyMaterial(settings.material, isDark: isDark);
+    unawaited(
+      DesktopWindowManager.instance.applyMaterial(
+        settings.material,
+        isDark: isDark,
+      ),
+    );
   }
 
   Future<void> refreshRangeData() async {
@@ -373,15 +383,17 @@ class AppController {
     _applyWindowAppearance(next);
 
     if (prev.autostart != next.autostart) {
-      await Win32Bridge.instance.setAutostart(next.autostart);
+      await DesktopWindowManager.instance.setAutostart(next.autostart);
     }
     if ((prev.widgetCompact != next.widgetCompact ||
             prev.widgetAlwaysOnTop != next.widgetAlwaysOnTop) &&
         ref.read(isMiniCardModeProvider)) {
-      Win32Bridge.instance.setWidgetMode(
-        true,
-        compact: next.widgetCompact,
-        alwaysOnTop: next.widgetAlwaysOnTop,
+      unawaited(
+        DesktopWindowManager.instance.setWidgetMode(
+          true,
+          compact: next.widgetCompact,
+          alwaysOnTop: next.widgetAlwaysOnTop,
+        ),
       );
     }
 
@@ -394,10 +406,12 @@ class AppController {
   void setWidgetMode(bool enabled) {
     final cur = ref.read(appSettingsProvider);
     ref.read(isMiniCardModeProvider.notifier).state = enabled;
-    Win32Bridge.instance.setWidgetMode(
-      enabled,
-      compact: cur.widgetCompact,
-      alwaysOnTop: cur.widgetAlwaysOnTop,
+    unawaited(
+      DesktopWindowManager.instance.setWidgetMode(
+        enabled,
+        compact: cur.widgetCompact,
+        alwaysOnTop: cur.widgetAlwaysOnTop,
+      ),
     );
   }
 

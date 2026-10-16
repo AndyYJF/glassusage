@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/format/app_format.dart';
 import 'core/i18n/app_i18n.dart';
 import 'core/theme/glass_theme.dart';
-import 'core/window/win32_bridge.dart';
+import 'core/window/desktop_window_manager.dart';
 import 'domain/models/settings_model.dart';
 import 'presentation/pages/agent_detail_page.dart';
 import 'presentation/pages/compare_page.dart';
@@ -16,8 +16,9 @@ import 'presentation/pages/usage_page.dart';
 import 'presentation/providers/app_providers.dart';
 import 'presentation/widgets/glass_widgets.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await DesktopWindowManager.instance.initialize();
   runApp(
     const ProviderScope(
       child: GlassUsageApp(),
@@ -197,7 +198,7 @@ class _GlassSidebar extends ConsumerWidget {
               // Brand header (draggable)
               GestureDetector(
                 behavior: HitTestBehavior.translucent,
-                onPanStart: (_) => Win32Bridge.instance.startDragging(),
+                onPanStart: (_) => DesktopWindowManager.instance.startDragging(),
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(8, 2, 8, 14),
                   child: Row(
@@ -479,8 +480,8 @@ class _GlassTopBar extends ConsumerWidget {
 
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
-      onPanStart: (_) => Win32Bridge.instance.startDragging(),
-      onDoubleTap: Win32Bridge.instance.toggleMaximize,
+      onPanStart: (_) => DesktopWindowManager.instance.startDragging(),
+      onDoubleTap: DesktopWindowManager.instance.toggleMaximize,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(24, 12, 16, 8),
         child: Row(
@@ -514,18 +515,18 @@ class _GlassTopBar extends ConsumerWidget {
             _WindowIconButton(
               icon: Icons.remove_rounded,
               tooltip: 'Minimize',
-              onTap: Win32Bridge.instance.minimize,
+              onTap: DesktopWindowManager.instance.minimize,
             ),
             _WindowIconButton(
               icon: Icons.crop_square_rounded,
               tooltip: 'Maximize',
-              onTap: Win32Bridge.instance.toggleMaximize,
+              onTap: DesktopWindowManager.instance.toggleMaximize,
             ),
             _WindowIconButton(
               icon: Icons.close_rounded,
               tooltip: 'Hide to Tray',
               isClose: true,
-              onTap: Win32Bridge.instance.hideToTray,
+              onTap: DesktopWindowManager.instance.hideToTray,
             ),
           ],
         ),

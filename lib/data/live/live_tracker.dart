@@ -83,8 +83,8 @@ class LiveTracker {
     }
 
     final cutoff = now - kLiveWindowMs;
-    while (_events.length > 20000 ||
-        (_events.isNotEmpty && _events.first.tsMs < cutoff - kLiveWindowMs)) {
+    _events.removeWhere((event) => event.tsMs < cutoff);
+    while (_events.length > 20000) {
       _events.removeFirst();
     }
   }
@@ -108,9 +108,7 @@ class LiveTracker {
     final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
     final cutoff = now - kLiveWindowMs;
 
-    while (_events.isNotEmpty && _events.first.tsMs < cutoff) {
-      _events.removeFirst();
-    }
+    _events.removeWhere((event) => event.tsMs < cutoff);
 
     var requests = 0.0;
     var tokens = 0.0;
@@ -118,6 +116,7 @@ class LiveTracker {
     final spark = List<int>.filled(60, 0);
 
     for (final e in _events) {
+      if (e.tsMs < cutoff) continue;
       if (e.tsMs > now + kLiveWindowMs) continue;
       if (e.isRequest) requests += 1.0;
       tokens += e.tokens.toDouble();

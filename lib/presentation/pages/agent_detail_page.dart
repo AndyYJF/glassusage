@@ -23,7 +23,6 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
   AgentStats? _stats;
   List<SeriesPoint> _series = const [];
   List<UsageRow> _recentEvents = const [];
-  bool _showCostSeries = false;
   bool _loading = false;
   int _loadRequest = 0;
 
@@ -259,35 +258,19 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        i18n.t('dash.activityOverTime'),
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: g.textPrimary,
-                        ),
-                      ),
-                    ),
-                    GlassSegmented<bool>(
-                      value: _showCostSeries,
-                      compact: true,
-                      options: [
-                        (false, i18n.t('common.tokens')),
-                        (true, i18n.t('common.cost')),
-                      ],
-                      onChanged: (v) => setState(() => _showCostSeries = v),
-                    ),
-                  ],
+                Text(
+                  i18n.t('dash.activityOverTime'),
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: g.textPrimary,
+                  ),
                 ),
                 const SizedBox(height: 14),
                 UsageChart(
                   i18n: i18n,
                   bucket: ref.watch(selectedRangeProvider).resolveBounds().$3,
                   points: _series,
-                  showCost: _showCostSeries,
                   colorBy: UsageChartColorMode.palette,
                   accentColor: brandColor,
                   height: 220,
