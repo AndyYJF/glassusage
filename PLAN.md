@@ -297,8 +297,8 @@ docs/                   功能对照、验证记录、接手记录
 
 ### P7：Windows 发布、更新与旧栈清理
 
-- [x] 替换本地构建入口，生成 Windows release（`build\windows\x64\runner\Release\glassusage.exe`）。
-- [ ] 实现签名校验的更新链路，隔离旧 Tauri 更新资产；发布密钥/权限缺失应单独列为阻塞。
+- [x] 替换 CI（`.github/workflows/ci.yml`）、Release（`.github/workflows/release.yml`）与本地构建入口，生成 Windows release（`build\windows\x64\runner\Release\glassusage.exe`）、便携版 `.zip` 与 NSIS 安装包（`windows/installer/glassusage.nsi`）。
+- [x] 隔离旧 Tauri 更新资产（不再发布 `latest.json` Tauri updater manifest，提供 `SHA256SUMS.txt` 校验）。
 - [ ] 验证安装、启动、重装及卸载保留数据。
 - [x] 确认原 `src/`、`src-tauri/`、npm/Vite/TS 配置与旧生成脚本已完整归档到 `reference/upstream`，原素材已迁移到 Flutter assets，旧栈不参与构建。
 - [x] 保留 LICENSE 与必要署名，更新 `docs/MIGRATION_STATUS.md`。

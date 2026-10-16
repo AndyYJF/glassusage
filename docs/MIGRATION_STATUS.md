@@ -14,7 +14,7 @@
 | **P4** | 远程 SSH 同步、DPAPI 凭据加密与状态管理 | ✅ Completed | `dpapi.dart`, `ssh_client.dart`, `remote_sync.dart`, `app_providers.dart` |
 | **P5** | Liquid Glass UI 全面开发（含 GPU 预算与帧率约束） | ✅ Completed | `DashboardPage`, `UsagePage`, `ComparePage`, `AgentDetailPage`, `SettingsPage`, `MiniCardView`, `OnboardingModal` + `test/widget_test.dart` passed |
 | **P6** | 桌面集成（系统托盘、全局热键、双模窗口切换、开机自启） | ✅ Completed | `win32_bridge.dart` + `flutter_window.cpp` + `win32_window.cpp` (`Shell_NotifyIconW`, `Ctrl+Alt+G`, DWM Acrylic/Mica, 24px→12px edge snap, `HKCU\...\Run\GlassUsage`) |
-| **P7** | 全量测试、性能审计与 Windows Release 构建 | ✅ Completed | `flutter analyze` (0 issues), `flutter test` (16/16 passed), `flutter build windows --release` |
+| **P7** | 全量测试、性能审计与 Windows Release / CI 管线构建 | ✅ Completed | `flutter analyze` (0 issues), `flutter test` (16/16 passed), `flutter build windows --release`, `.github/workflows/ci.yml` & `release.yml` + `windows/installer/glassusage.nsi` |
 
 ---
 

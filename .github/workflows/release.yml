@@ -2,13 +2,15 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag matching the application version (for example v0.3.1)"
-        required: true
+        description: "Optional release tag matching pubspec.yaml version (e.g. v0.7.0)"
+        required: false
         type: string
 
 permissions:
@@ -21,54 +23,139 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
-          cache: npm
+          fetch-depth: 0
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          components: clippy,rustfmt
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          workspaces: src-tauri -> target
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Verify release
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      - name: Resolve version and release tag
+        id: meta
+        shell: pwsh
         run: |
-          npm run check:versions
-          npm run build
-          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-          cargo test --locked --manifest-path src-tauri/Cargo.toml
-          cargo clippy --locked --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings
+          $pubspec = Get-Content -Raw pubspec.yaml
+          if ($pubspec -notmatch '(?m)^version:\s*([0-9]+\.[0-9]+\.[0-9]+)(?:\+[0-9]+)?\s*$') {
+            throw "Could not parse version from pubspec.yaml"
+          }
+          $appVersion = $Matches[1]
+          $expectedTag = "v$appVersion"
 
-      - name: Build & publish
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.tag }}" -ne "") {
+            $releaseTag = "${{ inputs.tag }}"
+            if ($releaseTag -ne $expectedTag) {
+              throw "Dispatch tag $releaseTag does not match pubspec.yaml version $expectedTag"
+            }
+            $shouldRelease = "true"
+          } elseif ("${{ github.ref_type }}" -eq "tag") {
+            $releaseTag = "${{ github.ref_name }}"
+            if ($releaseTag -ne $expectedTag) {
+              throw "Pushed tag $releaseTag does not match pubspec.yaml version $expectedTag"
+            }
+            $shouldRelease = "true"
+          } else {
+            $releaseTag = $expectedTag
+            $existing = git ls-remote --tags origin "refs/tags/$releaseTag"
+            if ([string]::IsNullOrWhiteSpace($existing)) {
+              Write-Host "Tag $releaseTag does not exist yet on origin. Proceeding with automated release."
+              $shouldRelease = "true"
+            } else {
+              Write-Host "Tag $releaseTag already exists on origin. Skipping release."
+              $shouldRelease = "false"
+            }
+          }
+
+          "app_version=$appVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "release_tag=$releaseTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "should_release=$shouldRelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Setup Flutter
+        if: steps.meta.outputs.should_release == 'true'
+        uses: subosito/flutter-action@e938fdf56512cc96ef2f93601a5a40bde3801046 # v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Verify & build Windows Release
+        if: steps.meta.outputs.should_release == 'true'
+        shell: pwsh
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+          flutter build windows --release
+
+      - name: Package Portable ZIP, NSIS Installer & SHA256 Checksums
+        if: steps.meta.outputs.should_release == 'true'
+        shell: pwsh
+        run: |
+          $version = "${{ steps.meta.outputs.app_version }}"
+          $releaseDir = "build/windows/x64/runner/Release"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+
+          # 1. Portable ZIP archive
+          $zipName = "GlassUsage_${version}_windows_x64_portable.zip"
+          $zipPath = Join-Path "dist" $zipName
+          Compress-Archive -Path "$releaseDir/*" -DestinationPath $zipPath -Force
+
+          # 2. NSIS Setup Installer (.exe)
+          $setupName = "GlassUsage_${version}_x64-setup.exe"
+          $setupPath = Join-Path (Resolve-Path "dist").Path $setupName
+          $buildAbs = (Resolve-Path $releaseDir).Path
+          $makensis = "makensis.exe"
+          if (-not (Get-Command $makensis -ErrorAction SilentlyContinue)) {
+            $defaultNsis = "C:\Program Files (x86)\NSIS\makensis.exe"
+            if (Test-Path $defaultNsis) {
+              $makensis = $defaultNsis
+            } else {
+              choco install nsis -y --no-progress
+              $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+            }
+          }
+          & $makensis "/DAPP_VERSION=$version" "/DBUILD_DIR=$buildAbs" "/DOUT_FILE=$setupPath" "windows/installer/glassusage.nsi"
+          if ($LASTEXITCODE -ne 0) {
+            throw "NSIS installer build failed with exit code $LASTEXITCODE"
+          }
+
+          # 3. SHA256SUMS.txt
+          $sumsPath = Join-Path "dist" "SHA256SUMS.txt"
+          $lines = @()
+          Get-ChildItem -Path "dist" -Filter "GlassUsage_*" | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $lines += "$hash  $($_.Name)"
+          }
+          $lines | Set-Content -Path $sumsPath -Encoding utf8
+          Get-Content $sumsPath
+
+      - name: Ensure Git tag exists on remote
+        if: steps.meta.outputs.should_release == 'true'
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.meta.outputs.release_tag }}"
+          $version = "${{ steps.meta.outputs.app_version }}"
+          $existing = git ls-remote --tags origin "refs/tags/$tag"
+          if ([string]::IsNullOrWhiteSpace($existing)) {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a $tag -m "Release GlassUsage $version"
+            git push origin "refs/tags/$tag"
+          }
+
+      - name: Publish GitHub Release
+        if: steps.meta.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Optional Authenticode (SmartScreen). Leave unset to ship unsigned installers.
-          TAURI_SIGNING_CERTIFICATE: ${{ secrets.TAURI_SIGNING_CERTIFICATE }}
-          TAURI_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.TAURI_SIGNING_CERTIFICATE_PASSWORD }}
         with:
-          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          releaseName: GlassUsage ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          releaseBody: |
-            ## Install / upgrade
-            Run the NSIS installer over an existing install. Same product id
-            (`com.glassusage.desktop`) — data under `%APPDATA%\com.glassusage.desktop` is kept.
-
-            In-app updates: Settings → Updates → Check for updates (signed via Tauri updater).
-          releaseDraft: false
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          name: GlassUsage ${{ steps.meta.outputs.release_tag }}
+          draft: false
           prerelease: false
-          includeUpdaterJson: true
+          generate_release_notes: true
+          body: |
+            ## GlassUsage ${{ steps.meta.outputs.release_tag }} (Pure Flutter Windows)
+
+            ### Install / Upgrade
+            - **Installer (`GlassUsage_${{ steps.meta.outputs.app_version }}_x64-setup.exe`)**: Standard Windows NSIS installer with Start Menu & Desktop shortcuts. Existing user data in `%APPDATA%\com.glassusage.app` and legacy `%APPDATA%\com.glassusage.desktop` is preserved and automatically migrated on first launch.
+            - **Portable (`GlassUsage_${{ steps.meta.outputs.app_version }}_windows_x64_portable.zip`)**: Extract and run `glassusage.exe` directly (no WebView2 runtime required).
+            - **Checksums (`SHA256SUMS.txt`)**: SHA-256 hashes for release verification.
+          files: |
+            dist/GlassUsage_${{ steps.meta.outputs.app_version }}_x64-setup.exe
+            dist/GlassUsage_${{ steps.meta.outputs.app_version }}_windows_x64_portable.zip
+            dist/SHA256SUMS.txt

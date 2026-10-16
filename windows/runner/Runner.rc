@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "glassusage" "\0"
+            VALUE "CompanyName", "GlassUsage" "\0"
+            VALUE "FileDescription", "GlassUsage - Real-time AI Coding Agent Token Monitor" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "glassusage" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 GlassUsage. All rights reserved." "\0"
             VALUE "OriginalFilename", "glassusage.exe" "\0"
-            VALUE "ProductName", "glassusage" "\0"
+            VALUE "ProductName", "GlassUsage" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
