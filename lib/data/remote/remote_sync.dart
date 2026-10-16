@@ -221,7 +221,10 @@ Future<List<(String, String)>> enumerateRemoteFiles(
         for (final f in await client.listDir(agentDir)) {
           validateRemoteComponent(f);
           if ((f.endsWith('.sqlite') || f.endsWith('.db')) &&
-              !f.contains('.reindex-lock.')) {
+              !f.contains('.reindex-lock.') &&
+              !f.contains('.generation-lock.') &&
+              !f.contains('.generation-writer.') &&
+              !f.endsWith('.lock.sqlite')) {
             out.add(('$agentDir/$f', 'agents/$agentId/agent/$f'));
           }
         }

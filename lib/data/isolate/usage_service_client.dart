@@ -144,11 +144,17 @@ class UsageServiceClient {
     return OverviewStats.fromJson((res as Map).cast<String, dynamic>());
   }
 
-  Future<AgentStats> getAgentStats(String source, int from, int to) async {
+  Future<AgentStats> getAgentStats(
+    String source,
+    int from,
+    int to, {
+    String? instance,
+  }) async {
     final res = await _call('get_agent_stats', {
       'source': source,
       'from': from,
       'to': to,
+      'instance': instance,
     });
     return AgentStats.fromJson((res as Map).cast<String, dynamic>());
   }

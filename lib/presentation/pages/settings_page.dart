@@ -16,7 +16,7 @@ import '../../domain/models/usage_models.dart';
 import '../providers/app_providers.dart';
 import '../widgets/glass_widgets.dart';
 
-const String kAppVersion = '0.7.3';
+const String kAppVersion = '0.7.4';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
@@ -63,6 +63,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final settings = ref.watch(appSettingsProvider);
     final cursorStatus = ref.watch(cursorStatusProvider);
     final remotes = ref.watch(remoteInstancesProvider);
+    final allSources = ref.watch(sourceHealthProvider);
     final pricing = ref.watch(pricingInfoProvider);
     final dataDir = ref.watch(dataDirProvider);
     final controller = ref.read(appControllerProvider);
@@ -327,92 +328,137 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   Column(
                     children: [
                       for (final r in remotes)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 6),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
+                        Builder(
+                          builder: (context) {
+                            final health = allSources
+                                .where(
+                                  (h) =>
+                                      h.source == r.agent &&
+                                      h.instance == r.name,
+                                )
+                                .firstOrNull;
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 6),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
                                       children: [
-                                        Text(
-                                          r.name,
-                                          style: TextStyle(
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.w600,
-                                            color: g.textPrimary,
-                                          ),
+                                        Row(
+                                          children: [
+                                            Text(
+                                              r.name,
+                                              style: TextStyle(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w600,
+                                                color: g.textPrimary,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            Text(
+                                              '${r.agent} · ${r.username}@${r.host}:${r.port} (${r.authMode})',
+                                              style: GlassTheme.tabularStyle(
+                                                fontSize: 11.5,
+                                                color: g.textSecondary,
+                                              ),
+                                            ),
+                                            if (health != null) ...[
+                                              const SizedBox(width: 8),
+                                              StatusPill(
+                                                status: health.status,
+                                                i18n: i18n,
+                                              ),
+                                              const SizedBox(width: 8),
+                                              Text(
+                                                '${fmtInt(health.eventCount)} ev',
+                                                style: GlassTheme.tabularStyle(
+                                                  fontSize: 11.5,
+                                                  color: g.textSecondary,
+                                                ),
+                                              ),
+                                            ],
+                                          ],
                                         ),
-                                        const SizedBox(width: 8),
-                                        Text(
-                                          '${r.agent} · ${r.username}@${r.host}:${r.port} (${r.authMode})',
-                                          style: GlassTheme.tabularStyle(
-                                            fontSize: 11.5,
-                                            color: g.textSecondary,
+                                        if (health?.lastError != null &&
+                                            health!.lastError!.isNotEmpty)
+                                          Padding(
+                                            padding:
+                                                const EdgeInsets.only(top: 3),
+                                            child: Text(
+                                              health.lastError!,
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                color: g.danger,
+                                              ),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
                                           ),
-                                        ),
                                       ],
                                     ),
-                                  ],
-                                ),
-                              ),
-                              GlassButton(
-                                label: i18n.t('settings.testConn'),
-                                compact: true,
-                                onPressed: () => _runRemoteTest(
-                                  context,
-                                  input: RemoteInstanceInput(
-                                    name: r.name,
-                                    agent: r.agent,
-                                    host: r.host,
-                                    port: r.port,
-                                    username: r.username,
-                                    authMode: r.authMode,
-                                    keyPath: r.keyPath,
-                                    remoteHome: r.remoteHome,
-                                    remotePath: r.remotePath,
-                                    pollSecs: r.pollSecs,
-                                    importArchives: r.importArchives,
-                                    enabled: r.enabled,
-                                    proxyUrl: r.proxyUrl,
                                   ),
-                                ),
+                                  GlassButton(
+                                    label: i18n.t('settings.testConn'),
+                                    compact: true,
+                                    onPressed: () => _runRemoteTest(
+                                      context,
+                                      input: RemoteInstanceInput(
+                                        name: r.name,
+                                        agent: r.agent,
+                                        host: r.host,
+                                        port: r.port,
+                                        username: r.username,
+                                        authMode: r.authMode,
+                                        keyPath: r.keyPath,
+                                        remoteHome: r.remoteHome,
+                                        remotePath: r.remotePath,
+                                        pollSecs: r.pollSecs,
+                                        importArchives: r.importArchives,
+                                        enabled: r.enabled,
+                                        proxyUrl: r.proxyUrl,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  GlassButton(
+                                    label: i18n.t('settings.syncNow'),
+                                    compact: true,
+                                    isLoading: _syncingRemoteName == r.name,
+                                    onPressed: () async {
+                                      setState(
+                                          () => _syncingRemoteName = r.name);
+                                      try {
+                                        await controller
+                                            .syncRemoteInstance(r.name);
+                                      } finally {
+                                        if (mounted) {
+                                          setState(
+                                              () => _syncingRemoteName = null);
+                                        }
+                                      }
+                                    },
+                                  ),
+                                  const SizedBox(width: 6),
+                                  GlassButton(
+                                    label: i18n.t('common.edit'),
+                                    compact: true,
+                                    onPressed: () =>
+                                        _showRemoteDialog(context, existing: r),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  GlassButton(
+                                    label: i18n.t('common.delete'),
+                                    variant: GlassButtonVariant.danger,
+                                    compact: true,
+                                    onPressed: () =>
+                                        controller.deleteRemoteInstance(r.name),
+                                  ),
+                                ],
                               ),
-                              const SizedBox(width: 6),
-                              GlassButton(
-                                label: i18n.t('settings.syncNow'),
-                                compact: true,
-                                isLoading: _syncingRemoteName == r.name,
-                                onPressed: () async {
-                                  setState(() => _syncingRemoteName = r.name);
-                                  try {
-                                    await controller.syncRemoteInstance(r.name);
-                                  } finally {
-                                    if (mounted) {
-                                      setState(() => _syncingRemoteName = null);
-                                    }
-                                  }
-                                },
-                              ),
-                              const SizedBox(width: 6),
-                              GlassButton(
-                                label: i18n.t('common.edit'),
-                                compact: true,
-                                onPressed: () =>
-                                    _showRemoteDialog(context, existing: r),
-                              ),
-                              const SizedBox(width: 6),
-                              GlassButton(
-                                label: i18n.t('common.delete'),
-                                variant: GlassButtonVariant.danger,
-                                compact: true,
-                                onPressed: () =>
-                                    controller.deleteRemoteInstance(r.name),
-                              ),
-                            ],
-                          ),
+                            );
+                          },
                         ),
                     ],
                   ),

@@ -657,37 +657,38 @@ class AppDatabase {
 
   // ----------------------------------------------------------------- queries
 
-  TokenBreakdown sumRange(int fromMs, int toMs, {String? source}) {
-    final sql = source != null
-        ? '''
-          SELECT
-            COALESCE(SUM(input_tokens), 0) AS inp,
-            COALESCE(SUM(output_tokens), 0) AS outp,
-            COALESCE(SUM(cache_read_tokens), 0) AS cr,
-            COALESCE(SUM(cache_write_tokens), 0) AS cw,
-            COALESCE(SUM(reasoning_tokens), 0) AS reas,
-            COALESCE(SUM(cost_usd), 0.0) AS cost,
-            COUNT(*) AS ev,
-            COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0) AS unpriced
-          FROM usage_events
-          WHERE ts_ms >= ?1 AND ts_ms <= ?2 AND source = ?3
-        '''
-        : '''
-          SELECT
-            COALESCE(SUM(input_tokens), 0) AS inp,
-            COALESCE(SUM(output_tokens), 0) AS outp,
-            COALESCE(SUM(cache_read_tokens), 0) AS cr,
-            COALESCE(SUM(cache_write_tokens), 0) AS cw,
-            COALESCE(SUM(reasoning_tokens), 0) AS reas,
-            COALESCE(SUM(cost_usd), 0.0) AS cost,
-            COUNT(*) AS ev,
-            COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0) AS unpriced
-          FROM usage_events
-          WHERE ts_ms >= ?1 AND ts_ms <= ?2
-        ''';
+  TokenBreakdown sumRange(
+    int fromMs,
+    int toMs, {
+    String? source,
+    String? instance,
+  }) {
+    final clauses = <String>['ts_ms >= ?', 'ts_ms <= ?'];
+    final args = <Object?>[fromMs, toMs];
+    if (source != null) {
+      clauses.add('source = ?');
+      args.add(source);
+    }
+    if (instance != null) {
+      clauses.add('instance = ?');
+      args.add(instance);
+    }
+    final whereSql = clauses.join(' AND ');
     final rows = _db.select(
-      sql,
-      source != null ? [fromMs, toMs, source] : [fromMs, toMs],
+      '''
+      SELECT
+        COALESCE(SUM(input_tokens), 0) AS inp,
+        COALESCE(SUM(output_tokens), 0) AS outp,
+        COALESCE(SUM(cache_read_tokens), 0) AS cr,
+        COALESCE(SUM(cache_write_tokens), 0) AS cw,
+        COALESCE(SUM(reasoning_tokens), 0) AS reas,
+        COALESCE(SUM(cost_usd), 0.0) AS cost,
+        COUNT(*) AS ev,
+        COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), 0) AS unpriced
+      FROM usage_events
+      WHERE $whereSql
+      ''',
+      args,
     );
     return _breakdownFromRow(rows.first);
   }
@@ -992,29 +993,52 @@ class AppDatabase {
     }).toList();
   }
 
-  AgentStats agentStats(String source, int fromMs, int toMs) {
-    final baseFilter = UsageFilter(
+  AgentStats agentStats(
+    String source,
+    int fromMs,
+    int toMs, {
+    String? instance,
+  }) {
+    final scopedFilter = UsageFilter(
+      from: fromMs,
+      to: toMs,
+      sources: [source],
+      instances: instance == null ? null : [instance],
+    );
+    final allInstancesFilter = UsageFilter(
       from: fromMs,
       to: toMs,
       sources: [source],
     );
-    final totals = sumRange(fromMs, toMs, source: source);
-    final perModel = groupStats('model_norm', baseFilter);
-    final perProject = groupStats('project', baseFilter);
-    final perInstance = groupStats('instance', baseFilter);
+    final totals = sumRange(fromMs, toMs, source: source, instance: instance);
+    final perModel = groupStats('model_norm', scopedFilter);
+    final perProject = groupStats('project', scopedFilter);
+    final perInstance = groupStats('instance', allInstancesFilter);
 
     final sinceDay = _localDateString(nowMs() - 180 * 86400 * 1000);
-    final calRows = _db.select(
-      '''
-      SELECT day,
-             SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS t
-      FROM daily_rollup
-      WHERE source = ?1 AND day >= ?2
-      GROUP BY day
-      ORDER BY day ASC
-      ''',
-      [source, sinceDay],
-    );
+    final calRows = instance != null
+        ? _db.select(
+            '''
+            SELECT day,
+                   SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS t
+            FROM daily_rollup
+            WHERE source = ?1 AND day >= ?2 AND instance = ?3
+            GROUP BY day
+            ORDER BY day ASC
+            ''',
+            [source, sinceDay, instance],
+          )
+        : _db.select(
+            '''
+            SELECT day,
+                   SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) AS t
+            FROM daily_rollup
+            WHERE source = ?1 AND day >= ?2
+            GROUP BY day
+            ORDER BY day ASC
+            ''',
+            [source, sinceDay],
+          );
     final calendar = calRows
         .map(
           (r) => CalendarPoint(

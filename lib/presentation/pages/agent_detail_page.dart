@@ -51,7 +51,10 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
       final preset = ref.read(selectedRangeProvider);
       final (from, to, _) = preset.resolveBounds();
       final results = await Future.wait([
-        controller.getAgentStats(widget.sourceId),
+        controller.getAgentStats(
+          widget.sourceId,
+          instance: _selectedInstance,
+        ),
         controller.queryUsageLog(
           UsageFilter(
             from: from,
@@ -83,6 +86,7 @@ class _AgentDetailPageState extends ConsumerState<AgentDetailPage> {
     final allSources = ref.watch(sourceHealthProvider);
 
     ref.listen(selectedRangeProvider, (_, _) => _loadAgentData());
+    ref.listen(overviewStatsProvider, (_, _) => _loadAgentData());
 
     final meta = kSourceMeta[widget.sourceId];
     final brandColor = GlassTheme.sourceColor(widget.sourceId);

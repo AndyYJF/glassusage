@@ -48,6 +48,14 @@ class OpenClawCollector extends Collector {
         .toList();
   }
 
+  static bool _isLockOrSidecarDb(String path) {
+    final name = p.basename(path).toLowerCase();
+    return name.contains('.reindex-lock.') ||
+        name.contains('.generation-lock.') ||
+        name.contains('.generation-writer.') ||
+        name.endsWith('.lock.sqlite');
+  }
+
   static List<String> databasesUnder(String root) {
     final agentsDir = Directory(p.join(root, 'agents'));
     final out = <String>[];
@@ -59,7 +67,8 @@ class OpenClawCollector extends Collector {
             if (dir.existsSync()) {
               for (final f in dir.listSync(followLinks: false)) {
                 if (f is File &&
-                    (hasExt(f.path, 'sqlite') || hasExt(f.path, 'db'))) {
+                    (hasExt(f.path, 'sqlite') || hasExt(f.path, 'db')) &&
+                    !_isLockOrSidecarDb(f.path)) {
                   out.add(f.path);
                 }
               }
@@ -69,7 +78,10 @@ class OpenClawCollector extends Collector {
       } catch (_) {}
     }
     if (out.isEmpty) {
-      return findFiles(root, (f) => hasExt(f, 'sqlite'));
+      return findFiles(
+        root,
+        (f) => hasExt(f, 'sqlite') && !_isLockOrSidecarDb(f),
+      );
     }
     return out;
   }
@@ -164,6 +176,10 @@ class OpenClawCollector extends Collector {
       if (found == null) return ScanReport();
       final (table, idCol, dataCol, orderCol) = found;
 
+      final hasSessionCol = columnExists(conn, table, 'session_id');
+      final hasSeqCol = columnExists(conn, table, 'seq');
+      final hasCreatedCol = columnExists(conn, table, 'created_at');
+
       final key = 'sqlite:$dbPath';
       final state =
           ctx.store.getScanState(SourceIds.openclaw, ctx.instance, key) ??
@@ -171,29 +187,70 @@ class OpenClawCollector extends Collector {
       final watermark = state.offset;
       var highWater = watermark;
 
+      final sessionSelect =
+          hasSessionCol ? '"session_id" AS session_val,' : 'NULL AS session_val,';
+      final rowSeqSelect =
+          hasSeqCol ? '"seq" AS row_seq_val,' : 'NULL AS row_seq_val,';
+      final createdSelect =
+          hasCreatedCol ? '"created_at" AS created_val,' : 'NULL AS created_val,';
+      final idSelect =
+          idCol == 'rowid' ? 'rowid AS id_val' : '"$idCol" AS id_val';
+      final orderSelect =
+          orderCol == 'rowid' ? 'rowid AS seq_val' : '"$orderCol" AS seq_val';
+      final orderExpr = orderCol == 'rowid' ? 'rowid' : '"$orderCol"';
+
       final rows = conn.select(
         '''
-        SELECT "$idCol" AS id_val, "$dataCol" AS data_val, "$orderCol" AS seq_val
+        SELECT $idSelect, $sessionSelect $rowSeqSelect $createdSelect "$dataCol" AS data_val, $orderSelect
         FROM "$table"
-        WHERE "$orderCol" >= ?1
-        ORDER BY "$orderCol"
+        WHERE $orderExpr >= ?1
+        ORDER BY $orderExpr
         ''',
         [watermark],
       );
 
       final report = ScanReport();
-      final project = ProjectHolder();
+      final defaultProject = ProjectHolder();
+      final projectBySession = <String, ProjectHolder>{};
+
       for (final r in rows) {
         final id = r['id_val']?.toString() ?? '';
+        final rowSessionId = r['session_val']?.toString() ?? '';
+        final rowSeq = r['row_seq_val']?.toString() ?? '';
+        final rowCreated = (r['created_val'] as num?)?.toInt();
         final data = r['data_val']?.toString() ?? '';
         final seq = (r['seq_val'] as num?)?.toInt() ?? 0;
         highWater = math.max(highWater, seq);
-        final outcome = parseEntry(data, ctx.instance, project);
+
+        final holder = rowSessionId.isNotEmpty
+            ? projectBySession.putIfAbsent(
+                rowSessionId,
+                () => ProjectHolder(defaultProject.value),
+              )
+            : defaultProject;
+
+        final outcome = parseEntry(
+          data,
+          ctx.instance,
+          holder,
+          fallbackSessionId: rowSessionId.isEmpty ? null : rowSessionId,
+          fallbackTsMs: rowCreated != null ? normalizeEpoch(rowCreated.toDouble()) : null,
+        );
+        if (rowSessionId.isNotEmpty &&
+            holder.value != null &&
+            defaultProject.value == null) {
+          defaultProject.value = holder.value;
+        }
+
         switch (outcome.type) {
           case OpenClawOutcomeType.event:
             final ev = outcome.event!;
-            if (id.isNotEmpty) {
-              ev.dedupKey = id;
+            if (ev.dedupKey.isEmpty) {
+              if (rowSessionId.isNotEmpty && rowSeq.isNotEmpty) {
+                ev.dedupKey = '$rowSessionId:$rowSeq';
+              } else if (id.isNotEmpty && idCol != 'rowid') {
+                ev.dedupKey = id;
+              }
             }
             report.events.add(ev);
           case OpenClawOutcomeType.skip:
@@ -233,6 +290,7 @@ class OpenClawCollector extends Collector {
     }
 
     for (final candidate in [
+      'transcript_events',
       'transcript',
       'entries',
       'messages',
@@ -245,7 +303,15 @@ class OpenClawCollector extends Collector {
       if (match.isNotEmpty) {
         final t = match.first;
         String? dataCol;
-        for (final c in ['data', 'json', 'payload', 'content', 'body']) {
+        for (final c in [
+          'event_json',
+          'payload_json',
+          'data',
+          'json',
+          'payload',
+          'content',
+          'body',
+        ]) {
           if (columnExists(conn, t, c)) {
             dataCol = c;
             break;
@@ -253,17 +319,25 @@ class OpenClawCollector extends Collector {
         }
         if (dataCol == null) continue;
         String idCol = 'rowid';
-        for (final c in ['id', 'entry_id', 'uuid', 'rowid']) {
+        for (final c in ['id', 'entry_id', 'event_id', 'uuid']) {
           if (columnExists(conn, t, c)) {
             idCol = c;
             break;
           }
         }
         String orderCol = 'rowid';
-        for (final c in ['seq', 'rowid', 'created_at', 'timestamp', 'ts']) {
-          if (columnExists(conn, t, c)) {
-            orderCol = c;
-            break;
+        // Check if `rowid` is selectable on this table (non-WITHOUT ROWID).
+        var hasRowId = false;
+        try {
+          conn.select('SELECT rowid FROM "$t" LIMIT 1');
+          hasRowId = true;
+        } catch (_) {}
+        if (!hasRowId) {
+          for (final c in ['created_at', 'timestamp', 'ts', 'seq']) {
+            if (columnExists(conn, t, c)) {
+              orderCol = c;
+              break;
+            }
           }
         }
         return (t, idCol, dataCol, orderCol);
@@ -275,8 +349,10 @@ class OpenClawCollector extends Collector {
   static OpenClawParseOutcome parseEntry(
     String line,
     String instance,
-    ProjectHolder project,
-  ) {
+    ProjectHolder project, {
+    String? fallbackSessionId,
+    int? fallbackTsMs,
+  }) {
     final trimmed = line.trim();
     if (trimmed.isEmpty) return const OpenClawParseOutcome.skip();
     dynamic v;
@@ -292,7 +368,13 @@ class OpenClawCollector extends Collector {
     final entryType = map['type'] as String? ?? '';
     if ((traceSchema != null && traceSchema.startsWith('openclaw')) ||
         entryType.contains('.')) {
-      return _parseTrajectory(map, instance, project);
+      return _parseTrajectory(
+        map,
+        instance,
+        project,
+        fallbackSessionId: fallbackSessionId,
+        fallbackTsMs: fallbackTsMs,
+      );
     }
 
     if (entryType == 'session') {
@@ -314,32 +396,85 @@ class OpenClawCollector extends Collector {
       return const OpenClawParseOutcome.skip();
     }
 
-    int n(String k) => (usage[k] as num?)?.toInt() ?? 0;
+    int n(List<String> keys) {
+      for (final k in keys) {
+        final val = usage[k];
+        if (val is num) return val.toInt();
+      }
+      return 0;
+    }
+
+    double? nativeCost;
+    final costObj = usage['cost'];
+    if (costObj is Map) {
+      final totalCost = (costObj['total'] as num?)?.toDouble();
+      if (totalCost != null && totalCost > 0) {
+        nativeCost = totalCost;
+      }
+    } else if (costObj is num && costObj.toDouble() > 0) {
+      nativeCost = costObj.toDouble();
+    }
 
     final ev = UsageEvent(
       source: SourceIds.openclaw,
       surface: SurfaceIds.cli,
       instance: instance,
-      dedupKey: (map['id'] as String?) ?? '',
-      inputTokens: n('inputTokens'),
-      outputTokens: n('outputTokens'),
-      cacheReadTokens: n('cacheReadTokens'),
-      cacheWriteTokens: n('cacheWriteTokens'),
-      reasoningTokens: n('reasoningTokens'),
+      dedupKey: (map['id'] as String?) ??
+          (message['id'] as String?) ??
+          '',
+      inputTokens: n(const [
+        'inputTokens',
+        'input',
+        'input_tokens',
+        'promptTokens',
+        'prompt_tokens',
+      ]),
+      outputTokens: n(const [
+        'outputTokens',
+        'output',
+        'output_tokens',
+        'completionTokens',
+        'completion_tokens',
+      ]),
+      cacheReadTokens: n(const [
+        'cacheReadTokens',
+        'cacheRead',
+        'cache_read_tokens',
+      ]),
+      cacheWriteTokens: n(const [
+        'cacheWriteTokens',
+        'cacheWrite',
+        'cache_write_tokens',
+        'cacheCreationTokens',
+        'cache_creation_tokens',
+      ]),
+      reasoningTokens: n(const [
+        'reasoningTokens',
+        'reasoning',
+        'reasoning_tokens',
+      ]),
+      costUsd: nativeCost,
     );
     if (ev.isEmpty) return const OpenClawParseOutcome.skip();
 
     ev.model = (map['model'] as String?) ??
         (message['model'] as String?) ??
         'unknown';
-    ev.provider = map['provider'] as String?;
+    ev.provider =
+        (map['provider'] as String?) ?? (message['provider'] as String?);
     ev.sessionId = (map['sessionId'] as String?) ??
         (map['session_id'] as String?) ??
+        (message['sessionId'] as String?) ??
+        fallbackSessionId ??
         '';
     ev.project = project.value;
     ev.timestamp = parseTimestamp(
-          map['timestamp'] ?? map['time'] ?? map['createdAt'],
+          map['timestamp'] ??
+              map['time'] ??
+              map['createdAt'] ??
+              message['timestamp'],
         ) ??
+        fallbackTsMs ??
         nowMs();
     if (ev.dedupKey.isEmpty) {
       ev.dedupKey = shaKey([
@@ -355,8 +490,10 @@ class OpenClawCollector extends Collector {
   static OpenClawParseOutcome _parseTrajectory(
     Map<String, dynamic> v,
     String instance,
-    ProjectHolder project,
-  ) {
+    ProjectHolder project, {
+    String? fallbackSessionId,
+    int? fallbackTsMs,
+  }) {
     final entryType = v['type'] as String? ?? '';
     final dataObj = v['data'] is Map
         ? Map<String, dynamic>.from(v['data'] as Map)
@@ -403,8 +540,10 @@ class OpenClawCollector extends Collector {
     ev.model =
         (v['modelId'] as String?) ?? (v['model'] as String?) ?? 'unknown';
     ev.provider = v['provider'] as String?;
-    ev.sessionId =
-        (v['sessionId'] as String?) ?? (v['traceId'] as String?) ?? '';
+    ev.sessionId = (v['sessionId'] as String?) ??
+        (v['traceId'] as String?) ??
+        fallbackSessionId ??
+        '';
     if (project.value == null) {
       final cwd = v['workspaceDir'] as String?;
       if (cwd != null) {
@@ -412,7 +551,8 @@ class OpenClawCollector extends Collector {
       }
     }
     ev.project = project.value;
-    ev.timestamp = parseTimestamp(v['ts'] ?? v['timestamp']) ?? nowMs();
+    ev.timestamp =
+        parseTimestamp(v['ts'] ?? v['timestamp']) ?? fallbackTsMs ?? nowMs();
 
     final seq = (v['seq'] as num?)?.toInt().toString() ?? '';
     ev.dedupKey = (ev.sessionId.isNotEmpty && seq.isNotEmpty)

@@ -464,6 +464,9 @@ class AppController {
     final updated = await client.upsertRemoteInstance(input);
     ref.read(remoteInstancesProvider.notifier).state = updated;
     await refreshSourcesAndRemotes();
+    unawaited(
+      syncRemoteInstance(input.name.trim()).catchError((_) => 0),
+    );
   }
 
   Future<void> deleteRemoteInstance(String name, {bool purgeData = true}) async {
@@ -498,10 +501,10 @@ class AppController {
     return client.getUsageLog(filter, page, pageSize);
   }
 
-  Future<AgentStats> getAgentStats(String source) async {
+  Future<AgentStats> getAgentStats(String source, {String? instance}) async {
     final client = _client!;
     final (from, to, _) = ref.read(selectedRangeProvider).resolveBounds();
-    return client.getAgentStats(source, from, to);
+    return client.getAgentStats(source, from, to, instance: instance);
   }
 
   Future<String> exportData({

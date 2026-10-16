@@ -431,5 +431,7 @@ class PricingService {
         'auto': 'unknown',
         'kimi-code/k3': 'kimi-k3',
         'k3': 'kimi-k3',
+        'k3-256k': 'kimi-k3',
+        'deepseek-v4-flash': 'deepseek-chat',
       };
 }

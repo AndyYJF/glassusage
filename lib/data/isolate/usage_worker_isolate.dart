@@ -103,6 +103,7 @@ class _UsageWorkerEngine {
   final List<StreamSubscription<WatchEvent>> _watchSubs = [];
   final Map<String, Timer> _watchDebounce = {};
   final Set<String> _runningRemoteSyncs = {};
+  final Map<String, int> _lastRemoteSyncMs = {};
   bool _scanBusy = false;
 
   _UsageWorkerEngine({
@@ -131,6 +132,7 @@ class _UsageWorkerEngine {
     Timer(const Duration(milliseconds: 350), () async {
       _setupWatchers();
       await scanAll();
+      _tickRemoteScheduler();
       unawaited(_syncCursorNow());
       try {
         store.reprice(pricing);
@@ -385,6 +387,45 @@ class _UsageWorkerEngine {
       runScan(collector.id);
       await Future<void>.delayed(Duration.zero);
     }
+    final settings = settingsStore.get();
+    for (final inst in store.listRemote().where((i) => i.enabled)) {
+      final snapshotDir = p.join(dataDir, 'remote', inst.name);
+      if (!Directory(snapshotDir).existsSync()) continue;
+      final collector = collectorById(inst.agent);
+      if (collector == null) continue;
+      try {
+        final ctx = ScanCtx(
+          store: store,
+          pricing: pricing,
+          settings: settings,
+          instance: inst.name,
+          rootOverride: snapshotDir,
+        );
+        final report = collector.scan(ctx);
+        final outcome = store.ingestScan(
+          report.events,
+          collector.writeMode,
+          report.states,
+        );
+        live.push(outcome.deltas);
+        store.recordStatus(
+          inst.agent,
+          inst.name,
+          report.filesSeen,
+          report.skipped,
+          report.detectedPaths,
+          null,
+        );
+        if (outcome.changed > 0) {
+          live.markTotalsDirty();
+          _refreshTodayTotals();
+          _checkBudgetAlerts();
+          _emitUsageUpdated(inst.agent, inst.name, outcome.changed);
+        }
+        _emitSourceStatus(inst.agent, inst.name, HealthStatus.polling, null);
+      } catch (_) {}
+      await Future<void>.delayed(Duration.zero);
+    }
   }
 
   String? _getCursorCookie() {
@@ -485,10 +526,16 @@ class _UsageWorkerEngine {
   }
 
   void _tickRemoteScheduler() {
+    final now = AppDatabase.nowMs();
     final instances = store.listRemote().where((i) => i.enabled);
     for (final inst in instances) {
       if (_runningRemoteSyncs.contains(inst.name)) continue;
+      final lastMs = _lastRemoteSyncMs[inst.name];
+      if (lastMs != null && (now - lastMs) < inst.pollSecs * 1000) {
+        continue;
+      }
       _runningRemoteSyncs.add(inst.name);
+      _lastRemoteSyncMs[inst.name] = now;
       Future(() async {
         try {
           await syncRemoteInstance(
@@ -533,7 +580,10 @@ class _UsageWorkerEngine {
         final source = args['source'] as String? ?? SourceIds.claude;
         final from = (args['from'] as num?)?.toInt() ?? 0;
         final to = (args['to'] as num?)?.toInt() ?? AppDatabase.nowMs();
-        return store.agentStats(source, from, to).toJson();
+        final instance = args['instance'] as String?;
+        return store
+            .agentStats(source, from, to, instance: instance)
+            .toJson();
 
       case 'get_timeseries':
         final from = (args['from'] as num?)?.toInt() ?? 0;

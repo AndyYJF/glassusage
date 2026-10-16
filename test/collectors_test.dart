@@ -1,14 +1,20 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:glassusage/data/collectors/collector_base.dart';
 import 'package:glassusage/data/collectors/dsh_collector.dart';
 import 'package:glassusage/data/collectors/kimi_collector.dart';
+import 'package:glassusage/data/collectors/openclaw_collector.dart';
 import 'package:glassusage/data/collectors/zstd_decoder.dart';
+import 'package:glassusage/data/database/app_database.dart';
+import 'package:glassusage/data/pricing/pricing_service.dart';
 import 'package:glassusage/data/remote/remote_sync.dart';
 import 'package:glassusage/data/remote/ssh_client.dart';
+import 'package:glassusage/domain/models/settings_model.dart';
 import 'package:glassusage/domain/models/usage_models.dart';
+import 'package:sqlite3/sqlite3.dart';
 
 Uint8List _hexBytes(String hex) {
   final out = Uint8List(hex.length ~/ 2);
@@ -163,6 +169,60 @@ void main() {
         shellQuote("/tmp/it's.db"),
         r"'/tmp/it'\''s.db'",
       );
+    });
+  });
+
+  group('OpenClawCollector', () {
+    test('scans_transcript_events_sqlite_with_short_usage_keys', () {
+      final tmp = Directory.systemTemp.createTempSync('openclaw_test_');
+      try {
+        final dbPath = '${tmp.path}${Platform.pathSeparator}openclaw-agent.sqlite';
+        final db = sqlite3.open(dbPath);
+        db.execute('''
+          CREATE TABLE transcript_events (
+            session_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            event_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (session_id, seq)
+          );
+        ''');
+        db.execute('''
+          INSERT INTO transcript_events (session_id, seq, event_json, created_at) VALUES
+          ('sess-1', 0, '{"type":"session","id":"sess-1","cwd":"/root/.openclaw/workspace"}', 1757587846000),
+          ('sess-1', 10, '{"type":"message","id":"msg-1","timestamp":"2026-09-11T10:50:55.554Z","message":{"role":"assistant","provider":"openai-codex","model":"gpt-5.4","usage":{"input":10658,"output":118,"cacheRead":9600,"cacheWrite":0}}}', 1757587855000),
+          ('sess-2', 0, '{"type":"session","id":"sess-2","cwd":"/srv/app"}', 1757588846000),
+          ('sess-2', 1, '{"type":"message","id":"msg-2","timestamp":"2026-09-11T11:00:00.000Z","message":{"role":"assistant","provider":"openai-codex","model":"gpt-5.4","usage":{"input":2000,"output":50,"cacheRead":500,"cacheWrite":100}}}', 1757588855000);
+        ''');
+        db.dispose();
+
+        final store = AppDatabase.open(tmp.path);
+        final out = OpenClawCollector.scanDb(
+          ScanCtx(
+            store: store,
+            pricing: PricingService(tmp.path),
+            settings: AppSettings(),
+            instance: 'jpsb',
+          ),
+          dbPath,
+        );
+        store.dispose();
+
+        expect(out.skipped, 0);
+        expect(out.events.length, 2);
+        expect(out.events[0].source, 'openclaw');
+        expect(out.events[0].instance, 'jpsb');
+        expect(out.events[0].project, 'workspace');
+        expect(out.events[0].model, 'gpt-5.4');
+        expect(out.events[0].provider, 'openai-codex');
+        expect(out.events[0].inputTokens, 10658);
+        expect(out.events[0].outputTokens, 118);
+        expect(out.events[0].cacheReadTokens, 9600);
+        expect(out.events[1].project, 'app');
+        expect(out.events[1].inputTokens, 2000);
+      } finally {
+        tmp.deleteSync(recursive: true);
+      }
     });
   });
 }
