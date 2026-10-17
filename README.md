@@ -1,5 +1,7 @@
 # GlassUsage
 
+Flutter 桌面工程使用 Flutter **3.47.7**。液态玻璃小窗支持 Windows 实时桌面折射、macOS ScreenCaptureKit 接入，以及 Linux 磨砂降级；构建方法、权限和验收状态见 [液态玻璃小窗接入文档](docs/LIQUID_GLASS_MINI.md)。下文保留原版项目说明。
+
 A Windows desktop monitor for the tokens your local AI coding agents are burning, with an
 Apple Liquid Glass interface.
 

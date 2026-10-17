@@ -28,6 +28,10 @@ class DesktopWindowManager extends WindowListener {
   Rect? _mainBounds;
   Timer? _snapTimer;
   bool _initialized = false;
+  bool _miniMode = false;
+  bool _miniFrosted = false;
+  WindowMaterial _material = WindowMaterial.acrylic;
+  bool _isDark = false;
 
   Future<void> initialize() async {
     if (_initialized ||
@@ -68,6 +72,16 @@ class DesktopWindowManager extends WindowListener {
   }
 
   @override
+  void onWindowMinimize() {
+    if (!_events.isClosed) _events.add('window:hidden');
+  }
+
+  @override
+  void onWindowRestore() {
+    if (!_events.isClosed) _events.add('window:visible');
+  }
+
+  @override
   void onWindowMoved() {
     if (!_events.isClosed) _events.add('window:moved');
     if (!_events.isClosed) _snapTimer?.cancel();
@@ -81,6 +95,8 @@ class DesktopWindowManager extends WindowListener {
     WindowMaterial material, {
     required bool isDark,
   }) async {
+    _material = material;
+    _isDark = isDark;
     if (!_initialized) return;
 
     final effect = switch (material) {
@@ -102,10 +118,32 @@ class DesktopWindowManager extends WindowListener {
             : acrylic.WindowEffect.contentBackground,
     };
     await acrylic.Window.setEffect(
-      effect: effect,
-      color: isDark ? const Color(0xCC171923) : const Color(0xCCF4F5F8),
+      effect: _miniMode
+          ? (_miniFrosted
+                ? (Platform.isMacOS
+                      ? acrylic.WindowEffect.sidebar
+                      : acrylic.WindowEffect.acrylic)
+                : acrylic.WindowEffect.transparent)
+          : effect,
+      color: _miniMode && !_miniFrosted
+          ? Colors.transparent
+          : isDark
+          ? const Color(0xCC171923)
+          : const Color(0xCCF4F5F8),
       dark: isDark,
     );
+  }
+
+  Future<void> setMiniFrosted(bool enabled) async {
+    if (_miniFrosted == enabled) return;
+    _miniFrosted = enabled;
+    if (!_initialized || !_miniMode) return;
+    try {
+      await applyMaterial(_material, isDark: _isDark);
+    } catch (_) {
+      // Some Linux compositors do not provide a system blur. The Dart surface
+      // remains readable without claiming to refract desktop content.
+    }
   }
 
   Future<void> startDragging() async {
@@ -123,7 +161,12 @@ class DesktopWindowManager extends WindowListener {
   }
 
   Future<void> hideToTray() async {
-    await windowManager.hide();
+    if (Platform.isWindows) {
+      await windowManager.hide();
+    } else {
+      // These platforms have no tray integration; retain a way to restore it.
+      await windowManager.minimize();
+    }
     if (!_events.isClosed) _events.add('window:hidden');
   }
 
@@ -138,6 +181,7 @@ class DesktopWindowManager extends WindowListener {
     required bool compact,
     required bool alwaysOnTop,
   }) async {
+    if (!_initialized) return;
     final currentBounds = await windowManager.getBounds();
     final displays = await screenRetriever.getAllDisplays();
     if (displays.isEmpty) return;
@@ -147,18 +191,29 @@ class DesktopWindowManager extends WindowListener {
       if (_mainBounds == null && currentBounds.width > 500) {
         _mainBounds = currentBounds;
       }
-      final size = Size(compact ? 228 : 300, compact ? 54 : 208);
-      final currentIsWidget = currentBounds.width <= 420;
-      final position =
-          currentIsWidget
-              ? currentBounds.topLeft
-              : Offset(workArea.right - size.width - 16, workArea.top + 16);
+      final size = Size(compact ? 228 : 432, compact ? 54 : 300);
+      final currentIsWidget = _miniMode;
+      final position = currentIsWidget
+          ? currentBounds.topLeft
+          : Offset(workArea.right - size.width - 16, workArea.top + 16);
       await windowManager.setMinimumSize(Size(size.width, size.height));
       await windowManager.setSize(size);
       await windowManager.setPosition(_clampPosition(position, size, workArea));
       await windowManager.setAlwaysOnTop(alwaysOnTop);
+      _miniMode = true;
+      if (Platform.isWindows) {
+        await _channel.invokeMethod<void>('setMiniMode', true);
+      }
+      await applyMaterial(_material, isDark: _isDark);
+      if (!_events.isClosed) _events.add('widget:ready');
       return;
     }
+
+    _miniMode = false;
+    if (Platform.isWindows) {
+      await _channel.invokeMethod<void>('setMiniMode', false);
+    }
+    await applyMaterial(_material, isDark: _isDark);
 
     final desiredBounds =
         _mainBounds ??
@@ -178,9 +233,8 @@ class DesktopWindowManager extends WindowListener {
   }
 
   Future<void> snapWidgetToEdge() async {
-    if (!_initialized) return;
+    if (!_initialized || !_miniMode) return;
     final bounds = await windowManager.getBounds();
-    if (bounds.width > 420) return;
     final displays = await screenRetriever.getAllDisplays();
     if (displays.isEmpty) return;
     final area = _workAreaFor(bounds, displays);

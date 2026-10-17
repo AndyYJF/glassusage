@@ -30,6 +30,10 @@ class FlutterWindow : public Win32Window {
   void RemoveTrayAndHotkey(HWND hwnd);
   void ShowTrayContextMenu(HWND hwnd);
   void NotifyDartEvent(const std::string& event_name);
+  void UpdateMiniRegion(HWND hwnd);
+
+  bool mini_mode_ = false;
+  LONG_PTR main_style_ = 0;
 
   // The project to run.
   flutter::DartProject project_;
