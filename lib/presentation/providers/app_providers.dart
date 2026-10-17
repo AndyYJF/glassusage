@@ -190,6 +190,12 @@ class AppController {
   StreamSubscription<String>? _win32EventSub;
   bool _initialized = false;
   int _rangeRequest = 0;
+  bool _disposed = false;
+  bool? _requestedWidgetMode;
+  int _widgetModeRequest = 0;
+
+  bool get _widgetModeTarget =>
+      _requestedWidgetMode ?? ref.read(isMiniCardModeProvider);
 
   UsageServiceClient? get client => _client;
 
@@ -267,7 +273,7 @@ class AppController {
       case 'tray:open':
         unawaited(DesktopWindowManager.instance.showMainWindow());
         ref.read(isWindowVisibleProvider.notifier).state = true;
-        if (ref.read(isMiniCardModeProvider)) {
+        if (_widgetModeTarget) {
           setWidgetMode(false);
         }
         refreshRangeData();
@@ -275,7 +281,7 @@ class AppController {
       case 'tray:widget':
         unawaited(DesktopWindowManager.instance.showMainWindow());
         ref.read(isWindowVisibleProvider.notifier).state = true;
-        setWidgetMode(!ref.read(isMiniCardModeProvider));
+        setWidgetMode(!_widgetModeTarget);
         break;
       case 'tray:rescan':
         rescanNow();
@@ -283,7 +289,7 @@ class AppController {
       case 'hotkey:toggle':
         unawaited(DesktopWindowManager.instance.showMainWindow());
         ref.read(isWindowVisibleProvider.notifier).state = true;
-        setWidgetMode(!ref.read(isMiniCardModeProvider));
+        setWidgetMode(!_widgetModeTarget);
         break;
     }
   }
@@ -387,14 +393,8 @@ class AppController {
     }
     if ((prev.widgetCompact != next.widgetCompact ||
             prev.widgetAlwaysOnTop != next.widgetAlwaysOnTop) &&
-        ref.read(isMiniCardModeProvider)) {
-      unawaited(
-        DesktopWindowManager.instance.setWidgetMode(
-          true,
-          compact: next.widgetCompact,
-          alwaysOnTop: next.widgetAlwaysOnTop,
-        ),
-      );
+        _widgetModeTarget) {
+      setWidgetMode(true);
     }
 
     final client = _client;
@@ -405,14 +405,35 @@ class AppController {
 
   void setWidgetMode(bool enabled) {
     final cur = ref.read(appSettingsProvider);
-    ref.read(isMiniCardModeProvider.notifier).state = enabled;
-    unawaited(
-      DesktopWindowManager.instance.setWidgetMode(
+    final request = ++_widgetModeRequest;
+    _requestedWidgetMode = enabled;
+    unawaited(_applyWidgetMode(enabled, cur, request));
+  }
+
+  Future<void> _applyWidgetMode(
+    bool enabled,
+    AppSettings settings,
+    int request,
+  ) async {
+    try {
+      await DesktopWindowManager.instance.setWidgetMode(
         enabled,
-        compact: cur.widgetCompact,
-        alwaysOnTop: cur.widgetAlwaysOnTop,
-      ),
-    );
+        compact: settings.widgetCompact,
+        alwaysOnTop: settings.widgetAlwaysOnTop,
+      );
+      if (!_disposed) {
+        ref.read(isMiniCardModeProvider.notifier).state = enabled;
+      }
+    } catch (error, stack) {
+      FlutterError.reportError(FlutterErrorDetails(
+        exception: error,
+        stack: stack,
+        library: 'GlassUsage window management',
+        context: ErrorDescription('while switching window mode'),
+      ));
+    } finally {
+      if (request == _widgetModeRequest) _requestedWidgetMode = null;
+    }
   }
 
   Future<void> setCompactWidget(bool compact) async {
@@ -545,6 +566,7 @@ class AppController {
   }
 
   void dispose() {
+    _disposed = true;
     _rangeRequest++;
     _liveSub?.cancel();
     _usageUpdatedSub?.cancel();
