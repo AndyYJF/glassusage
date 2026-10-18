@@ -66,7 +66,10 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
     unawaited(_loadOptics());
     _events = DesktopWindowManager.instance.events.listen((event) {
       if (event == 'window:hidden') unawaited(_glass.setPaused(true));
-      if (event == 'window:visible') unawaited(_glass.setPaused(false));
+      if (event == 'window:visible') {
+        unawaited(_glass.setPaused(false));
+        unawaited(_refresh());
+      }
       if (event == 'widget:ready') {
         _refreshTimer?.cancel();
         _refreshTimer = Timer(const Duration(milliseconds: 350), () {
@@ -83,6 +86,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
       unawaited(_glass.setPaused(true));
     } else if (state == AppLifecycleState.resumed) {
       unawaited(_glass.setPaused(false));
+      unawaited(_refresh());
     }
   }
 
