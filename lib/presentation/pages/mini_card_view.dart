@@ -50,6 +50,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   Timer? _refreshTimer;
   Timer? _statsTimer;
   bool _busy = false;
+  bool _refreshPending = false;
   bool _useScene = false;
   String? _captureError;
   String? _shaderError;
@@ -151,11 +152,15 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   }
 
   Future<void> _refresh() async {
-    if (_busy || !mounted) return;
+    if (!mounted || _useScene) return;
+    if (_busy) {
+      _refreshPending = true;
+      return;
+    }
     setState(() => _busy = true);
     try {
       await _glass.connect(shaderSupported: _liveShader != null);
-      if (!mounted) return;
+      if (!mounted || _useScene) return;
       if (_glass.session == null) return;
       _statsTimer ??= Timer.periodic(
         const Duration(seconds: 1),
@@ -166,6 +171,10 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
       if (mounted) setState(() => _captureError = '$error');
     } finally {
       if (mounted) setState(() => _busy = false);
+      if (_refreshPending) {
+        _refreshPending = false;
+        if (mounted && !_useScene) unawaited(_refresh());
+      }
     }
   }
 

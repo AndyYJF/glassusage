@@ -60,6 +60,7 @@ class DesktopGlassController extends ChangeNotifier {
       final stats = await backend.stats(owned.id);
       if (_disposed || session?.id != owned.id) return null;
       currentStats = stats;
+      if (stats == null) session = null;
       if (stats == null || stats.error != null) {
         reason = stats?.error ?? 'sessionEnded';
         mode = DesktopGlassMode.frosted;

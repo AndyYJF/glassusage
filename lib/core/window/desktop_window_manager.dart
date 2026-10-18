@@ -122,21 +122,34 @@ class DesktopWindowManager extends WindowListener {
             ? acrylic.WindowEffect.transparent
             : acrylic.WindowEffect.contentBackground,
     };
-    await acrylic.Window.setEffect(
-      effect: _miniMode
-          ? (_miniFrosted
-                ? (Platform.isMacOS
-                      ? acrylic.WindowEffect.sidebar
-                      : acrylic.WindowEffect.acrylic)
-                : acrylic.WindowEffect.transparent)
-          : effect,
-      color: _miniMode && !_miniFrosted
-          ? Colors.transparent
-          : isDark
-          ? const Color(0xCC171923)
-          : const Color(0xCCF4F5F8),
-      dark: isDark,
-    );
+    try {
+      await acrylic.Window.setEffect(
+        effect:
+            _miniMode
+                ? (_miniFrosted
+                    ? (Platform.isMacOS
+                        ? acrylic.WindowEffect.sidebar
+                        : acrylic.WindowEffect.acrylic)
+                    : acrylic.WindowEffect.transparent)
+                : effect,
+        color:
+            _miniMode && !_miniFrosted
+                ? Colors.transparent
+                : isDark
+                ? const Color(0xCC171923)
+                : const Color(0xCCF4F5F8),
+        dark: isDark,
+      );
+    } catch (error, stack) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stack,
+          library: 'GlassUsage window management',
+          context: ErrorDescription('while applying window material'),
+        ),
+      );
+    }
   }
 
   Future<void> setMiniFrosted(bool enabled) async {
