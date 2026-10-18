@@ -4,9 +4,12 @@ publish_to: 'none'
 version: 0.7.10+1
 
 environment:
-  sdk: ^3.7.0
+  sdk: ^3.13.5
+  flutter: '>=3.47.7'
 
 dependencies:
+  desktop_glass:
+    path: packages/desktop_glass
   flutter:
     sdk: flutter
   flutter_localizations:
@@ -36,7 +39,11 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  shaders:
+    - assets/shaders/liquid_glass.frag
   assets:
+    - reference/liquid_glass/LICENSE
+    - reference/liquid_glass/NOTICE
     - assets/pricing-fallback.json
     - assets/lens/
     - assets/icons/

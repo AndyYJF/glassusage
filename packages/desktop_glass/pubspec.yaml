@@ -1,0 +1,17 @@
+name: desktop_glass
+description: Session-owned desktop backdrop textures for GlassUsage.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.13.5
+  flutter: '>=3.47.7'
+dependencies:
+  flutter:
+    sdk: flutter
+flutter:
+  plugin:
+    platforms:
+      windows:
+        pluginClass: DesktopGlassPluginCApi
+      macos:
+        pluginClass: DesktopGlassPlugin

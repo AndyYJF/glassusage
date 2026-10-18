@@ -14,6 +14,7 @@ constexpr UINT kMenuIdOpen = 1001;
 constexpr UINT kMenuIdWidget = 1002;
 constexpr UINT kMenuIdRescan = 1003;
 constexpr UINT kMenuIdQuit = 1004;
+
 }  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -46,6 +47,37 @@ bool FlutterWindow::OnCreate() {
 
   HWND hwnd = GetHandle();
 
+  win32_channel_->SetMethodCallHandler(
+      [this, hwnd](const auto& call, auto result) {
+        if (call.method_name() == "setMiniMode") {
+          const auto* enabled = call.arguments()
+              ? std::get_if<bool>(call.arguments()) : nullptr;
+          if (!enabled) {
+            result->Error("argument", "Expected mini mode boolean");
+            return;
+          }
+          if (*enabled != mini_mode_) {
+            if (*enabled) {
+              main_style_ = GetWindowLongPtr(hwnd, GWL_STYLE);
+              SetWindowLongPtr(hwnd, GWL_STYLE,
+                              WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS |
+                              (main_style_ & WS_VISIBLE));
+            } else {
+              SetWindowLongPtr(hwnd, GWL_STYLE, main_style_);
+              SetWindowRgn(hwnd, nullptr, TRUE);
+            }
+            mini_mode_ = *enabled;
+            SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                         SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            UpdateMiniRegion(hwnd);
+          }
+          result->Success();
+        } else {
+          result->NotImplemented();
+        }
+      });
+
   SetupTrayAndHotkey(hwnd);
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -58,6 +90,17 @@ bool FlutterWindow::OnCreate() {
   flutter_controller_->ForceRedraw();
 
   return true;
+}
+
+void FlutterWindow::UpdateMiniRegion(HWND hwnd) {
+  if (!mini_mode_) return;
+  RECT rect{};
+  GetWindowRect(hwnd, &rect);
+  const int diameter = MulDiv(56, GetDpiForWindow(hwnd), 96);
+  HRGN region = CreateRoundRectRgn(0, 0, rect.right - rect.left + 1,
+                                 rect.bottom - rect.top + 1,
+                                 diameter, diameter);
+  if (region && !SetWindowRgn(hwnd, region, TRUE)) DeleteObject(region);
 }
 
 void FlutterWindow::SetupTrayAndHotkey(HWND hwnd) {
@@ -130,6 +173,7 @@ void FlutterWindow::NotifyDartEvent(const std::string& event_name) {
 }
 
 void FlutterWindow::OnDestroy() {
+  win32_channel_.reset();
   RemoveTrayAndHotkey(GetHandle());
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
@@ -142,6 +186,10 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // window_manager's hidden title bar reserves resize borders. A mini popup
+  // uses the entire rectangle, matching Flutter's rounded glass surface.
+  if (mini_mode_ && message == WM_NCCALCSIZE) return 0;
+  if (message == WM_SIZE || message == WM_DPICHANGED) UpdateMiniRegion(hwnd);
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

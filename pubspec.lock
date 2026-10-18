@@ -89,6 +89,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.22.5"
+  desktop_glass:
+    dependency: "direct main"
+    description:
+      path: "packages/desktop_glass"
+      relative: true
+    source: path
+    version: "0.1.0"
   fake_async:
     dependency: transitive
     description:
@@ -454,5 +461,5 @@ packages:
     source: hosted
     version: "0.5.2"
 sdks:
-  dart: ">=3.11.0-0 <4.0.0"
-  flutter: ">=3.27.0"
+  dart: ">=3.13.5 <4.0.0"
+  flutter: ">=3.47.7"
