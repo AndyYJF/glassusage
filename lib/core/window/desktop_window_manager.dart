@@ -82,9 +82,17 @@ class DesktopWindowManager extends WindowListener {
   }
 
   @override
+  void onWindowMove() {
+    // A new native move can start before the previous snap debounce fires.
+    // Cancel it immediately so setPosition never competes with a live drag.
+    _snapTimer?.cancel();
+    _snapTimer = null;
+  }
+
+  @override
   void onWindowMoved() {
     if (!_events.isClosed) _events.add('window:moved');
-    if (!_events.isClosed) _snapTimer?.cancel();
+    _snapTimer?.cancel();
     if (_events.isClosed) return;
     _snapTimer = Timer(const Duration(milliseconds: 220), () {
       unawaited(snapWidgetToEdge());

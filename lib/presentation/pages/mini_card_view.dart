@@ -303,28 +303,22 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
                 ),
               ),
             ),
-          GestureDetector(
-            behavior: HitTestBehavior.translucent,
-            onPanStart: (_) {
-              DesktopWindowManager.instance.startDragging();
-            },
-            child: Container(
-              constraints: const BoxConstraints.expand(),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(28),
-                border: Border.all(
-                  color: Colors.white.withValues(alpha: 0.65),
-                  width: 1.2,
-                ),
+          Container(
+            constraints: const BoxConstraints.expand(),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(28),
+              border: Border.all(
+                color: Colors.white.withValues(alpha: 0.65),
+                width: 1.2,
               ),
-              padding: EdgeInsets.symmetric(
-                horizontal: compact ? 12 : 20,
-                vertical: compact ? 8 : 12,
-              ),
-              child: compact
-                  ? _buildCompact(context, g, live, controller)
-                  : _buildFull(context, g, i18n, live, controller),
             ),
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 12 : 20,
+              vertical: compact ? 8 : 12,
+            ),
+            child: compact
+                ? _buildCompact(context, g, live, controller)
+                : _buildFull(context, g, i18n, live, controller),
           ),
         ],
       ),
@@ -350,14 +344,18 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         ),
         const SizedBox(width: 8),
         Expanded(
-          child: Text(
-            '${fmtTokens(live.tpm.round())}/m · ${fmtUsd(live.costToday)}',
-            style: GlassTheme.tabularStyle(
-              fontSize: 12.5,
-              fontWeight: FontWeight.w700,
-              color: _foreground,
+          child: Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: (_) => _startDragging(),
+            child: Text(
+              '${fmtTokens(live.tpm.round())}/m · ${fmtUsd(live.costToday)}',
+              style: GlassTheme.tabularStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+                color: _foreground,
+              ),
+              overflow: TextOverflow.ellipsis,
             ),
-            overflow: TextOverflow.ellipsis,
           ),
         ),
         IconButton(
@@ -403,13 +401,17 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
             ),
             const SizedBox(width: 7),
             Expanded(
-              child: Text(
-                'GLASSUSAGE LIVE',
-                style: TextStyle(
-                  fontSize: 10.5,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.7,
-                  color: _secondary,
+              child: Listener(
+                behavior: HitTestBehavior.translucent,
+                onPointerDown: (_) => _startDragging(),
+                child: Text(
+                  'GLASSUSAGE LIVE',
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.7,
+                    color: _secondary,
+                  ),
                 ),
               ),
             ),
@@ -506,22 +508,30 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         ),
         const SizedBox(height: 8),
         Expanded(
-          child: Sparkline(
-            values: live.spark60,
-            color: g.accentBlue,
-            height: 44,
+          child: Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: (_) => _startDragging(),
+            child: Sparkline(
+              values: live.spark60,
+              color: g.accentBlue,
+              height: 44,
+            ),
           ),
         ),
         const SizedBox(height: 6),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(
-              '${i18n.t('range.today')}: ${fmtTokens(live.tokensToday)}',
-              style: GlassTheme.tabularStyle(
-                fontSize: 11.5,
-                fontWeight: FontWeight.w600,
-                color: _secondary,
+            Listener(
+              behavior: HitTestBehavior.translucent,
+              onPointerDown: (_) => _startDragging(),
+              child: Text(
+                '${i18n.t('range.today')}: ${fmtTokens(live.tokensToday)}',
+                style: GlassTheme.tabularStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  color: _secondary,
+                ),
               ),
             ),
             Text(
@@ -614,6 +624,10 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         padding: EdgeInsets.zero,
         constraints: const BoxConstraints.tightFor(width: 28, height: 28),
       );
+
+  void _startDragging() {
+    unawaited(DesktopWindowManager.instance.startDragging());
+  }
 
   Widget _slider(
     String label,
