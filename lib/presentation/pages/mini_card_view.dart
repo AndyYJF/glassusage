@@ -26,8 +26,6 @@ class MiniCardView extends ConsumerStatefulWidget {
 class _MiniCardViewState extends ConsumerState<MiniCardView>
     with WidgetsBindingObserver {
   final _glass = DesktopGlassController();
-  late final Ticker _frameTicker;
-  bool _paused = false;
   ui.FragmentShader? _shader;
   ui.FragmentShader? _liveShader;
   ui.Image? _scene;
@@ -61,16 +59,13 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   @override
   void initState() {
     super.initState();
-    // External textures can schedule raster-only frames. Keep Flutter's frame
-    // clock in sync while content moves so FrameTiming measures the live view.
-    _frameTicker = Ticker((_) {});
     WidgetsBinding.instance.addObserver(this);
     _glass.addListener(_onGlassChanged);
     SchedulerBinding.instance.addTimingsCallback(_recordTimings);
     unawaited(_loadOptics());
     _events = DesktopWindowManager.instance.events.listen((event) {
-      if (event == 'window:hidden') _setPaused(true);
-      if (event == 'window:visible') _setPaused(false);
+      if (event == 'window:hidden') unawaited(_glass.setPaused(true));
+      if (event == 'window:visible') unawaited(_glass.setPaused(false));
       if (event == 'widget:ready') {
         _refreshTimer?.cancel();
         _refreshTimer = Timer(const Duration(milliseconds: 350), () {
@@ -84,26 +79,10 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.hidden ||
         state == AppLifecycleState.paused) {
-      _setPaused(true);
+      unawaited(_glass.setPaused(true));
     } else if (state == AppLifecycleState.resumed) {
-      _setPaused(false);
+      unawaited(_glass.setPaused(false));
     }
-  }
-
-  void _setPaused(bool paused) {
-    _paused = paused;
-    unawaited(_glass.setPaused(paused));
-    _syncFrameClock();
-  }
-
-  void _syncFrameClock() {
-    final moving =
-        !_paused &&
-        !_useScene &&
-        !_idle &&
-        _glass.mode == DesktopGlassMode.realtime;
-    if (moving && !_frameTicker.isActive) _frameTicker.start();
-    if (!moving && _frameTicker.isActive) _frameTicker.stop();
   }
 
   void _onGlassChanged() {
@@ -124,7 +103,6 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         _lightBackdrop = !GlassTheme.of(context).isDark;
       }
     });
-    _syncFrameClock();
     unawaited(
       DesktopWindowManager.instance.setMiniFrosted(
         !_useScene && _glass.mode == DesktopGlassMode.frosted,
@@ -201,17 +179,16 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
       final delta = elapsed - _lastElapsed;
       setState(() {
         _hasLiveFrame = stats.frames > 0;
-        _fps = delta > 0 ? (_renderedFrames - _lastRenderedFrames) / delta : 0;
+        _fps = delta > 0 ? (presented - _lastPresented) / delta : 0;
         _idle = stats.changes == _lastChanges;
         final luminance = stats.luminance;
         if (luminance > 0.62) _lightBackdrop = true;
         if (luminance < 0.42) _lightBackdrop = false;
         _captureError = stats.error;
       });
-      _syncFrameClock();
       if (const bool.fromEnvironment('LIVE_GLASS_METRICS')) {
         debugPrint(
-          'LIVE_GLASS_METRICS ${jsonEncode({...stats.raw, 'rasterFrames': _renderedFrames, 'rasterFps': _fps, 'textureFps': delta > 0 ? (presented - _lastPresented) / delta : 0, 'maxRasterMs': _maxRasterMs, 'rasterMs': _rasterSamples})}',
+          'LIVE_GLASS_METRICS ${jsonEncode({...stats.raw, 'rasterFrames': _renderedFrames, 'rasterFps': delta > 0 ? (_renderedFrames - _lastRenderedFrames) / delta : 0, 'textureFps': _fps, 'maxRasterMs': _maxRasterMs, 'rasterMs': _rasterSamples})}',
         );
       }
       _lastRenderedFrames = _renderedFrames;
@@ -230,7 +207,6 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
     WidgetsBinding.instance.removeObserver(this);
     _glass.removeListener(_onGlassChanged);
     _glass.dispose();
-    _frameTicker.dispose();
     _refreshTimer?.cancel();
     SchedulerBinding.instance.removeTimingsCallback(_recordTimings);
     _statsTimer?.cancel();
@@ -429,7 +405,6 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
                   _lastElapsed = 0;
                   _lastPresented = 0;
                   unawaited(_glass.disconnect());
-                  _syncFrameClock();
                 } else {
                   unawaited(_refresh());
                 }
@@ -565,8 +540,8 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
                     _shaderError ??
                     _captureError ??
                     (i18n.isZh
-                        ? '实时桌面折射，目标 60 帧/秒；静止背景按需更新'
-                        : 'Live desktop refraction, targeting 60 fps; idle scenes update on demand'),
+                        ? '实时桌面折射；数字为纹理回调频率，不代表显示器扫描输出；静止背景按需更新'
+                        : 'Live desktop refraction; the rate counts texture callbacks, not display scanout; idle scenes update on demand'),
                 child: Text(
                   _shaderError != null
                       ? (i18n.isZh ? '折射不可用' : 'Lens unavailable')
@@ -582,7 +557,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
                       ? (i18n.isZh ? '正在连接实时桌面…' : 'Connecting live desktop…')
                       : _idle
                       ? (i18n.isZh ? '实时桌面 · 静止待命' : 'Live desktop · idle')
-                      : '${i18n.isZh ? '实时桌面' : 'Live desktop'} · ${_fps.toStringAsFixed(0)} fps',
+                      : '${i18n.isZh ? '实时桌面 · 纹理' : 'Live desktop · texture'} ${_fps.toStringAsFixed(0)} fps',
                   style: TextStyle(fontSize: 10, color: _secondary),
                   overflow: TextOverflow.ellipsis,
                 ),
