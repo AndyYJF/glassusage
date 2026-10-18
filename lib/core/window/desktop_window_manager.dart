@@ -21,6 +21,9 @@ class DesktopWindowManager extends WindowListener {
   static final DesktopWindowManager instance = DesktopWindowManager._();
 
   static const MethodChannel _channel = MethodChannel('glassusage/win32');
+  static const MethodChannel _windowManagerChannel = MethodChannel(
+    'window_manager',
+  );
   final StreamController<String> _events = StreamController.broadcast();
 
   Stream<String> get events => _events.stream;
@@ -155,6 +158,12 @@ class DesktopWindowManager extends WindowListener {
   }
 
   Future<void> startDragging() async {
+    if (Platform.isWindows && _miniMode) {
+      // Mini mode cannot be fullscreen; call the plugin method directly to
+      // avoid its extra isFullScreen platform-channel round trip.
+      await _windowManagerChannel.invokeMethod<void>('startDragging');
+      return;
+    }
     await windowManager.startDragging();
   }
 
