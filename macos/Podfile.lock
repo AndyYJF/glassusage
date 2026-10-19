@@ -1,0 +1,22 @@
+PODS:
+  - desktop_glass (0.1.0):
+    - FlutterMacOS
+  - FlutterMacOS (1.0.0)
+
+DEPENDENCIES:
+  - desktop_glass (from `Flutter/ephemeral/.symlinks/plugins/desktop_glass/macos`)
+  - FlutterMacOS (from `Flutter/ephemeral`)
+
+EXTERNAL SOURCES:
+  desktop_glass:
+    :path: Flutter/ephemeral/.symlinks/plugins/desktop_glass/macos
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+
+SPEC CHECKSUMS:
+  desktop_glass: 3d68875afc8758a142d1cafaaf288a66562682d0
+  FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
+
+PODFILE CHECKSUM: 3978f6c005951f8693a896ddc38bb6b413d041f2
+
+COCOAPODS: 1.16.2
