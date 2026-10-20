@@ -14,12 +14,46 @@ class GlassCapabilities {
   final String? reason;
 }
 
+/// 原生捕获会话及其纹理坐标元数据。
+///
+/// 当前 macOS 和 Windows 均在原生输出小窗区域，并返回 `displayMapped=false`。
+/// 可选坐标字段仅描述纹理布局，不应被用来恢复 Dart 逐帧查询窗口位置的路径。
 class GlassSession {
-  const GlassSession({required this.id, required this.textureId});
+  const GlassSession({
+    required this.id,
+    required this.textureId,
+    this.textureOriginX = 0,
+    this.textureOriginY = 0,
+    this.textureScale = 1,
+    this.textureWidth = 0,
+    this.textureHeight = 0,
+    this.displayMapped = false,
+  });
   final int id;
   final int textureId;
+
+  /// Where the capture texture's (0,0) sits, in global top-left logical
+  /// points (window_manager's coordinate space), and how many texture pixels
+  /// one logical point covers. Only meaningful when [displayMapped] is true;
+  /// otherwise the texture matches the window exactly.
+  final double textureOriginX;
+  final double textureOriginY;
+  final double textureScale;
+
+  /// Capture texture size in logical points (the display size when
+  /// [displayMapped] is true).
+  final double textureWidth;
+  final double textureHeight;
+
+  /// Whether the texture covers a display region and must be cropped using
+  /// the texture origin/scale above.
+  final bool displayMapped;
 }
 
+/// 原生会话的低频诊断快照。
+///
+/// [frames] 是捕获输出数，[presented] 是取纹理回调数；后者可能重复读取，
+/// 两者都不能单独证明屏幕显示帧率或拖动位置已同步。
 class GlassStats {
   GlassStats(Map<String, dynamic> data)
     : frames = (data['frames'] as num?)?.toInt() ?? 0,
@@ -28,6 +62,12 @@ class GlassStats {
       elapsed = (data['elapsed'] as num?)?.toDouble() ?? 0,
       luminance = (data['luminance'] as num?)?.toDouble() ?? 0,
       paused = data['paused'] == true,
+      textureOriginX = (data['textureOriginX'] as num?)?.toDouble() ?? 0,
+      textureOriginY = (data['textureOriginY'] as num?)?.toDouble() ?? 0,
+      textureScale = (data['textureScale'] as num?)?.toDouble() ?? 1,
+      textureWidth = (data['textureWidth'] as num?)?.toDouble() ?? 0,
+      textureHeight = (data['textureHeight'] as num?)?.toDouble() ?? 0,
+      displayMapped = data['displayMapped'] == true,
       error = (data['error'] as String?)?.isEmpty == false
           ? data['error'] as String
           : null,
@@ -38,6 +78,12 @@ class GlassStats {
   final double elapsed;
   final double luminance;
   final bool paused;
+  final double textureOriginX;
+  final double textureOriginY;
+  final double textureScale;
+  final double textureWidth;
+  final double textureHeight;
+  final bool displayMapped;
   final String? error;
   final Map<String, dynamic> raw;
 }
@@ -96,6 +142,12 @@ class DesktopGlass {
     return GlassSession(
       id: data['sessionId'] as int,
       textureId: data['textureId'] as int,
+      textureOriginX: (data['textureOriginX'] as num?)?.toDouble() ?? 0,
+      textureOriginY: (data['textureOriginY'] as num?)?.toDouble() ?? 0,
+      textureScale: (data['textureScale'] as num?)?.toDouble() ?? 1,
+      textureWidth: (data['textureWidth'] as num?)?.toDouble() ?? 0,
+      textureHeight: (data['textureHeight'] as num?)?.toDouble() ?? 0,
+      displayMapped: data['displayMapped'] == true,
     );
   }
 

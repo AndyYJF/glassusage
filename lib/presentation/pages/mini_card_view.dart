@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui;
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,6 +17,10 @@ import '../providers/app_providers.dart';
 import '../widgets/charts.dart';
 import '../widgets/odometer.dart';
 
+/// 显示用量小窗，并将实时画面的逐帧刷新交给原生外部纹理。
+///
+/// 审核时需同时查看 desktop_glass 插件和原生窗口拖动实现；
+/// 本组件只负责会话、控件和低频统计，不在 Dart 中追踪桌面裁剪位置。
 class MiniCardView extends ConsumerStatefulWidget {
   const MiniCardView({super.key});
 
@@ -52,6 +57,9 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   bool _busy = false;
   bool _refreshPending = false;
   bool _useScene = false;
+  bool _glassSuspended = false;
+  bool _glassPaused = false;
+  bool _readingStats = false;
   String? _captureError;
   String? _shaderError;
   double _refraction = 32;
@@ -60,14 +68,23 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   @override
   void initState() {
     super.initState();
+    final saved = ref.read(appSettingsProvider);
+    _refraction = saved.widgetRefraction.clamp(0.0, 60.0).toDouble();
+    _chromatic = saved.widgetChromatic.clamp(0.0, 4.0).toDouble();
     WidgetsBinding.instance.addObserver(this);
     _glass.addListener(_onGlassChanged);
     SchedulerBinding.instance.addTimingsCallback(_recordTimings);
     unawaited(_loadOptics());
     _events = DesktopWindowManager.instance.events.listen((event) {
-      if (event == 'window:hidden') unawaited(_glass.setPaused(true));
+      if (event == 'window:hidden') _setGlassPaused(true);
+      if (event == 'widget:suspend-glass') {
+        unawaited(_glass.setPaused(true));
+        if (mounted && !_glassSuspended) {
+          setState(() => _glassSuspended = true);
+        }
+      }
       if (event == 'window:visible') {
-        unawaited(_glass.setPaused(false));
+        _setGlassPaused(false);
         unawaited(_refresh());
       }
       if (event == 'widget:ready') {
@@ -83,11 +100,18 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.hidden ||
         state == AppLifecycleState.paused) {
-      unawaited(_glass.setPaused(true));
+      _setGlassPaused(true);
     } else if (state == AppLifecycleState.resumed) {
-      unawaited(_glass.setPaused(false));
+      _setGlassPaused(false);
       unawaited(_refresh());
     }
+  }
+
+  void _setGlassPaused(bool paused) {
+    if (mounted && _glassPaused != paused) {
+      setState(() => _glassPaused = paused);
+    }
+    unawaited(_glass.setPaused(paused));
   }
 
   void _onGlassChanged() {
@@ -166,8 +190,9 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
       await _glass.connect(shaderSupported: _liveShader != null);
       if (!mounted || _useScene) return;
       if (_glass.session == null) return;
+      // 100ms 仅等待首帧；收到捕获帧后恢复到 1Hz，不用统计定时器驱动画面。
       _statsTimer ??= Timer.periodic(
-        const Duration(seconds: 1),
+        const Duration(milliseconds: 100),
         (_) => _readStats(),
       );
       await _readStats();
@@ -183,14 +208,23 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   }
 
   Future<void> _readStats() async {
-    if (!mounted || _useScene) return;
+    if (!mounted || _useScene || _readingStats) return;
+    _readingStats = true;
     try {
       final stats = await _glass.refreshStats();
       if (!mounted || stats == null) return;
+      if (!_hasLiveFrame && stats.frames > 0) {
+        _statsTimer?.cancel();
+        _statsTimer = Timer.periodic(
+          const Duration(seconds: 1),
+          (_) => _readStats(),
+        );
+      }
       final elapsed = stats.elapsed;
       final presented = stats.presented;
       final delta = elapsed - _lastElapsed;
       setState(() {
+        // frames 是捕获端计数；不能等 presented，纹理显示前还没有取帧回调。
         _hasLiveFrame = stats.frames > 0;
         _fps = delta > 0 ? (presented - _lastPresented) / delta : 0;
         _idle = stats.changes == _lastChanges;
@@ -212,6 +246,8 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
       _lastPresented = presented;
     } catch (error) {
       if (mounted) setState(() => _captureError = '$error');
+    } finally {
+      _readingStats = false;
     }
   }
 
@@ -245,6 +281,8 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
 
     final useLive =
         !_useScene &&
+        !_glassSuspended &&
+        !_glassPaused &&
         _hasLiveFrame &&
         _textureId != null &&
         _liveShader != null &&
@@ -255,7 +293,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         fit: StackFit.expand,
         children: [
           if (useLive)
-            _LiveGlassSurface(
+            _DesktopGlassSurface(
               shader: _liveShader!,
               textureId: _textureId!,
               refraction: _refraction,
@@ -526,12 +564,14 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
           _refraction,
           60,
           (value) => setState(() => _refraction = value),
+          (value) => controller.patchSettings({'widgetRefraction': value}),
         ),
         _slider(
           i18n.isZh ? '色散' : 'RGB',
           _chromatic,
           4,
           (value) => setState(() => _chromatic = value),
+          (value) => controller.patchSettings({'widgetChromatic': value}),
         ),
         Row(
           children: [
@@ -541,8 +581,8 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
                     _shaderError ??
                     _captureError ??
                     (i18n.isZh
-                        ? '实时桌面折射；数字为纹理回调频率，不代表显示器扫描输出；静止背景按需更新'
-                        : 'Live desktop refraction; the rate counts texture callbacks, not display scanout; idle scenes update on demand'),
+                        ? '实时桌面折射；纹理提交 ${_fps.toStringAsFixed(0)} 次/秒，仅用于诊断，不代表显示帧率'
+                        : 'Live desktop refraction; ${_fps.toStringAsFixed(0)} texture submissions/s, a diagnostic count rather than display FPS'),
                 child: Text(
                   _shaderError != null
                       ? (i18n.isZh ? '折射不可用' : 'Lens unavailable')
@@ -558,7 +598,9 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
                       ? (i18n.isZh ? '正在连接实时桌面…' : 'Connecting live desktop…')
                       : _idle
                       ? (i18n.isZh ? '实时桌面 · 静止待命' : 'Live desktop · idle')
-                      : '${i18n.isZh ? '实时桌面 · 纹理' : 'Live desktop · texture'} ${_fps.toStringAsFixed(0)} fps',
+                      : (i18n.isZh
+                            ? '实时桌面 · 连续刷新'
+                            : 'Live desktop · continuous'),
                   style: TextStyle(fontSize: 10, color: _secondary),
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -610,6 +652,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
     double value,
     double max,
     ValueChanged<double> change,
+    ValueChanged<double> persist,
   ) => SizedBox(
     height: 28,
     child: Row(
@@ -619,19 +662,18 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
           child: Text(label, style: TextStyle(fontSize: 10, color: _secondary)),
         ),
         Expanded(
-          child: SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              trackHeight: 2,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-            ),
-            child: Slider(
+          // 合并时保留无 OverlayPortal 的滑块：Material Slider 曾产生孤立 AX 节点，
+          // 返回主界面时在 AccessibilityBridge 崩溃；此处仍保留滑块语义与交互。
+          child: Semantics(
+            label: label,
+            child: CupertinoSlider(
               value: value,
               min: 0,
               max: max,
               activeColor: _foreground,
-              inactiveColor: _foreground.withValues(alpha: 0.3),
+              thumbColor: _foreground,
               onChanged: _shader == null ? null : change,
+              onChangeEnd: _shader == null ? null : persist,
             ),
           ),
         ),
@@ -647,8 +689,11 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   );
 }
 
-class _LiveGlassSurface extends StatelessWidget {
-  const _LiveGlassSurface({
+/// Filter the live texture directly, as in the initial Windows implementation.
+/// The texture is the filter's child so native frame updates invalidate its
+/// output without a Dart ticker or a cached sibling backdrop.
+class _DesktopGlassSurface extends StatelessWidget {
+  const _DesktopGlassSurface({
     required this.shader,
     required this.textureId,
     required this.refraction,
@@ -662,6 +707,12 @@ class _LiveGlassSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
+      final texture = Texture(
+        textureId: textureId,
+        filterQuality: FilterQuality.low,
+      );
+      // 两项都关闭时真正直出桌面纹理，避免“关了效果”仍经过模糊/着色器。
+      if (refraction == 0 && chromatic == 0) return texture;
       final dpr = MediaQuery.devicePixelRatioOf(context);
       final size = constraints.biggest * dpr;
       final radius = (size.shortestSide / 2).clamp(0.0, 28 * dpr).toDouble();
@@ -704,10 +755,7 @@ class _LiveGlassSurface extends StatelessWidget {
         imageFilter: ui.ImageFilter.shader(shader),
         child: ImageFiltered(
           imageFilter: ui.ImageFilter.blur(sigmaX: 0.8, sigmaY: 0.8),
-          child: Texture(
-            textureId: textureId,
-            filterQuality: FilterQuality.low,
-          ),
+          child: texture,
         ),
       );
     },
