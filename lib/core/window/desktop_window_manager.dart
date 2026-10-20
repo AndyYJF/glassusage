@@ -21,6 +21,11 @@ class DesktopWindowManager extends WindowListener {
   static final DesktopWindowManager instance = DesktopWindowManager._();
 
   static const MethodChannel _channel = MethodChannel('glassusage/win32');
+  // 与 macos/Runner/MainFlutterWindow.swift 的处理器配套合并；
+  // 小窗拖动仅在手势开始时跨通道，后续鼠标移动由原生处理。
+  static const MethodChannel _macWindowChannel = MethodChannel(
+    'glassusage/desktop_window',
+  );
   static const MethodChannel _windowManagerChannel = MethodChannel(
     'window_manager',
   );
@@ -164,6 +169,21 @@ class DesktopWindowManager extends WindowListener {
     }
   }
 
+  /// Windows: native mini-window styling. macOS: hides the traffic-light
+  /// buttons that would overlap the mini card. Cosmetic; tolerate runners
+  /// without the handler.
+  Future<void> _setNativeMiniMode(bool enabled) async {
+    try {
+      if (Platform.isWindows) {
+        await _channel.invokeMethod<void>('setMiniMode', enabled);
+      } else if (Platform.isMacOS) {
+        await _macWindowChannel.invokeMethod<void>('setMiniMode', enabled);
+      }
+    } on MissingPluginException {
+      // Older runner without the handler.
+    }
+  }
+
   Future<void> startDragging() async {
     // Cancel once before the native move loop; Windows emits a Dart event for
     // every WM_MOVING message, so avoid work in onWindowMove per mouse update.
@@ -175,10 +195,20 @@ class DesktopWindowManager extends WindowListener {
       await _windowManagerChannel.invokeMethod<void>('startDragging');
       return;
     }
+    if (Platform.isMacOS && _miniMode) {
+      // 不走 window_manager 的 performDrag 嵌套循环，保证拖动中仍可提交纹理。
+      await _macWindowChannel.invokeMethod<void>('startMiniDragging');
+      return;
+    }
     await windowManager.startDragging();
   }
 
   Future<void> minimize() => windowManager.minimize();
+
+  /// Window top-left in global top-left logical points (the same space the
+  /// desktop_glass texture origin is reported in).
+  Future<Offset> windowTopLeft() async =>
+      (await windowManager.getBounds()).topLeft;
 
   Future<void> toggleMaximize() async {
     if (await windowManager.isMaximized()) {
@@ -252,18 +282,20 @@ class DesktopWindowManager extends WindowListener {
       );
       await windowManager.setAlwaysOnTop(alwaysOnTop);
       _miniMode = true;
-      if (Platform.isWindows) {
-        await _channel.invokeMethod<void>('setMiniMode', true);
-      }
+      await _setNativeMiniMode(true);
       await applyMaterial(_material, isDark: _isDark);
       if (!_events.isClosed) _events.add('widget:ready');
       return;
     }
 
     _miniMode = false;
-    if (Platform.isWindows) {
-      await _channel.invokeMethod<void>('setMiniMode', false);
+    if (Platform.isMacOS) {
+      // 先暂停并移除实时纹理，再恢复主窗口尺寸与材质，给在途绘制留出缓冲。
+      // 此延迟不是无障碍崩溃修复；该修复位于 MiniCardView 的滑块实现。
+      if (!_events.isClosed) _events.add('widget:suspend-glass');
+      await Future<void>.delayed(const Duration(milliseconds: 120));
     }
+    await _setNativeMiniMode(false);
     await applyMaterial(_material, isDark: _isDark);
 
     final desiredBounds =

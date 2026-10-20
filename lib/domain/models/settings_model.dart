@@ -97,6 +97,11 @@ class AppSettings {
   final bool widgetCompact;
   final bool widgetAlwaysOnTop;
   final String widgetShortcut;
+  /// 小窗折射强度，由界面限制在 0–60 并在拖动结束后持久化。
+  final double widgetRefraction;
+
+  /// 小窗色散强度，由界面限制在 0–4；与折射同时为零时跳过实时滤镜。
+  final double widgetChromatic;
   final bool antigravityIdeEnabled;
   final int autoRefreshSecs;
   final bool firstRunDone;
@@ -119,6 +124,8 @@ class AppSettings {
     this.widgetCompact = false,
     this.widgetAlwaysOnTop = true,
     this.widgetShortcut = 'CmdOrCtrl+Alt+G',
+    this.widgetRefraction = 32.0,
+    this.widgetChromatic = 1.2,
     this.antigravityIdeEnabled = true,
     this.autoRefreshSecs = 30,
     this.firstRunDone = false,
@@ -154,6 +161,8 @@ class AppSettings {
         'widgetCompact': widgetCompact,
         'widgetAlwaysOnTop': widgetAlwaysOnTop,
         'widgetShortcut': widgetShortcut,
+        'widgetRefraction': widgetRefraction,
+        'widgetChromatic': widgetChromatic,
         'antigravityIdeEnabled': antigravityIdeEnabled,
         'autoRefreshSecs': autoRefreshSecs,
         'firstRunDone': firstRunDone,
@@ -191,6 +200,11 @@ class AppSettings {
       widgetAlwaysOnTop: json['widgetAlwaysOnTop'] as bool? ?? true,
       widgetShortcut:
           json['widgetShortcut'] as String? ?? 'CmdOrCtrl+Alt+G',
+      // 旧设置文件没有这两个键时沿用初始视觉参数，不要求迁移配置文件。
+      widgetRefraction:
+          (json['widgetRefraction'] as num?)?.toDouble() ?? 32.0,
+      widgetChromatic:
+          (json['widgetChromatic'] as num?)?.toDouble() ?? 1.2,
       antigravityIdeEnabled: json['antigravityIdeEnabled'] as bool? ?? true,
       autoRefreshSecs: (json['autoRefreshSecs'] as num?)?.toInt() ?? 30,
       firstRunDone: json['firstRunDone'] as bool? ?? false,
