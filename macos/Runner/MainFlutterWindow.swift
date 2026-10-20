@@ -6,6 +6,29 @@ import FlutterMacOS
 class MainFlutterWindow: NSWindow {
   private var miniMode = false
   private var miniDragMonitor: Any?
+  private weak var miniFlutterViewController: FlutterViewController?
+  private var movableBeforeMiniMode: Bool?
+
+  override func sendEvent(_ event: NSEvent) {
+    if miniMode, let flutter = miniFlutterViewController {
+      // 小窗的左键序列直接交给 Flutter，避免 NSWindow 同时启动标题栏移动。
+      // 仅仅命中 FlutterView 不够：原先顶部仍在两次自定义移动之间被额外改位。
+      // Flutter 继续判断按钮、滑块与拖动手势；不按固定标题栏高度划分区域。
+      switch event.type {
+      case .leftMouseDown:
+        if !isKeyWindow { makeKey() }
+        flutter.mouseDown(with: event)
+      case .leftMouseDragged:
+        flutter.mouseDragged(with: event)
+      case .leftMouseUp:
+        flutter.mouseUp(with: event)
+      default:
+        super.sendEvent(event)
+      }
+    } else {
+      super.sendEvent(event)
+    }
+  }
 
   // 松开鼠标、退出小窗及窗口释放都必须移除监听，避免残留拖动状态。
   private func endMiniDrag() {
@@ -39,6 +62,7 @@ class MainFlutterWindow: NSWindow {
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
+    miniFlutterViewController = flutterViewController
     let windowFrame = self.frame
     self.contentViewController = flutterViewController
     self.setFrame(windowFrame, display: true)
@@ -55,6 +79,19 @@ class MainFlutterWindow: NSWindow {
       case "setMiniMode":
         let mini = (call.arguments as? Bool) ?? false
         if let window = self {
+          // 完整/紧凑互切会重复传 true；只在首次进入时保存主窗口原值。
+          if mini != window.miniMode {
+            if mini {
+              window.movableBeforeMiniMode = window.isMovable
+              // 同时关闭 WindowServer 的标题栏移动；事件转发负责绕过 AppKit。
+              window.isMovable = false
+            } else {
+              if let movable = window.movableBeforeMiniMode {
+                window.isMovable = movable
+              }
+              window.movableBeforeMiniMode = nil
+            }
+          }
           window.miniMode = mini
           if !mini { window.endMiniDrag() }
           for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {

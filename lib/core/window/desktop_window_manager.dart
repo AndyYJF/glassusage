@@ -169,9 +169,11 @@ class DesktopWindowManager extends WindowListener {
     }
   }
 
-  /// Windows: native mini-window styling. macOS: hides the traffic-light
-  /// buttons that would overlap the mini card. Cosmetic; tolerate runners
-  /// without the handler.
+  /// Applies native mini-window styling and macOS mouse routing.
+  ///
+  /// macOS disables system titlebar movement and forwards mini-window mouse
+  /// events to Flutter; leaving mini mode restores the original movable state.
+  /// Older runners without the handler are tolerated.
   Future<void> _setNativeMiniMode(bool enabled) async {
     try {
       if (Platform.isWindows) {
