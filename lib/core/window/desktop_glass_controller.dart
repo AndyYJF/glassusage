@@ -61,8 +61,16 @@ class DesktopGlassController extends ChangeNotifier {
       if (_disposed || session?.id != owned.id) return null;
       currentStats = stats;
       if (stats == null) session = null;
-      if (stats == null || stats.error != null) {
-        reason = stats?.error ?? 'sessionEnded';
+      if (stats == null) {
+        reason = 'sessionEnded';
+        mode = DesktopGlassMode.frosted;
+      } else if (!stats.hasValidFrame) {
+        reason = stats.captureState;
+        mode = stats.captureState == 'failed'
+            ? DesktopGlassMode.frosted
+            : DesktopGlassMode.connecting;
+      } else if (stats.error != null) {
+        reason = stats.error;
         mode = DesktopGlassMode.frosted;
       } else {
         reason = null;
@@ -78,6 +86,26 @@ class DesktopGlassController extends ChangeNotifier {
       }
       return null;
     }
+  }
+
+  Future<void> reconnect({required bool shaderSupported}) async {
+    if (_disposed || _connecting) return;
+    final generation = ++_generation;
+    final owned = session;
+    session = null;
+    currentStats = null;
+    mode = DesktopGlassMode.connecting;
+    reason = null;
+    notifyListeners();
+    if (owned != null) {
+      try {
+        await backend.stop(owned.id);
+      } catch (_) {
+        // start() replaces any native session that survived this best-effort stop.
+      }
+    }
+    if (_disposed || generation != _generation) return;
+    await connect(shaderSupported: shaderSupported);
   }
 
   Future<void> setPaused(bool paused) async {

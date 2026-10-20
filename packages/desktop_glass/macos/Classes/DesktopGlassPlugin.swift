@@ -107,18 +107,29 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
   private var stream: SCStream?
   private var latest: CVPixelBuffer?
   private var desktop: CVPixelBuffer?
+  private var activeStreamID: ObjectIdentifier?
+  private var recoveryEpoch: Int64 = 1
+  private var hasValidFrame = false
+  private var captureState = "waitingForFrame"
+  private var lastFrameAt: TimeInterval = 0
+  private var lastFrameStatus = "started"
+  private var frameDeadline: TimeInterval = 0
+  private var rebuildAttempts = 0
   private let imageContext: CIContext
   private let colorSpace = CGColorSpaceCreateDeviceRGB()
   // Pool and crop cache are confined to Flutter's raster thread.
   private var cropPool: CVPixelBufferPool?
   private var cropSize = CGSize.zero
   private var renderedVersion: Int64 = -1
+  private var renderedEpoch: Int64 = -1
   private var renderedRect = CGRect.null
   private var geometryTimer: Timer?
   private var notificationPending = false
   private var sampledAt: TimeInterval = 0
   private var frames: Int64 = 0
   private var presented: Int64 = 0
+  private var cropPoolMisses: Int64 = 0
+  private var staleCropDrops: Int64 = 0
   private var changes: Int64 = 0
   private var lastHash: UInt64 = 0
   private var luminance: Double = 0
@@ -135,6 +146,7 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
   private var retryAt: TimeInterval = 0
   private var needsRebuild = false
   private var observers: [NSObjectProtocol] = []
+  private var workspaceObservers: [NSObjectProtocol] = []
   private var watchdogTimer: Timer?
   private let started = ProcessInfo.processInfo.systemUptime
 
@@ -160,8 +172,10 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
     displayPoints = geometry.display.frame.size
     sampleRect = windowRectInDisplay() ?? .zero
     let filter = SCContentFilter(display: geometry.display, excludingWindows: own)
-    stream = SCStream(filter: filter, configuration: geometry.config, delegate: self)
-    try stream!.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
+    let initialStream = SCStream(filter: filter, configuration: geometry.config, delegate: self)
+    try initialStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: outputQueue)
+    stream = initialStream
+    activeStreamID = ObjectIdentifier(initialStream)
     textureId = registry.register(self)
     guard textureId != 0 else { throw captureError("Cannot register desktop texture") }
   }
@@ -218,6 +232,10 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
         self?.reconcile()
       })
     }
+    observers.append(center.addObserver(forName: NSWindow.didBecomeKeyNotification,
+        object: window, queue: .main) { [weak self] _ in
+      self?.recoverIfPaused()
+    })
     // Re-crop the latest display frame on moves, even if the desktop is idle.
     for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
       observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
@@ -234,6 +252,12 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
     observers.append(center.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
       self?.updateGeometry()
     })
+    workspaceObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.activeSpaceDidChangeNotification,
+      object: NSWorkspace.shared,
+      queue: .main) { [weak self] _ in
+        self?.recoverAfterSpaceChange()
+      })
     // Common-mode geometry polling also runs inside AppKit's native drag loop.
     // It never reconfigures the capture stream.
     geometryTimer = Timer(timeInterval: 1.0 / Double(fps), repeats: true) { [weak self] _ in
@@ -247,6 +271,7 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
     RunLoop.main.add(geometryTimer!, forMode: .common)
     // Slow watchdog: start/stop retries and anything the notifications missed.
     watchdogTimer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+      self?.checkFrameDeadline()
       self?.updateGeometry()
       self?.reconcile()
     }
@@ -255,25 +280,111 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
   }
 
   func setPaused(_ value: Bool) {
-    lock.lock(); paused = value; lock.unlock()
+    lock.lock()
+    paused = value
+    let frameIsValid = hasValidFrame
+    if value {
+      hasValidFrame = false
+      captureState = "paused"
+      desktop = nil
+      latest = nil
+    }
+    lock.unlock()
+    if !value && window?.isOnActiveSpace == true && !frameIsValid {
+      recoverAfterSpaceChange()
+      return
+    }
     reconcile()
+  }
+
+  private func recoverIfPaused() {
+    lock.lock(); let needsRecovery = paused; lock.unlock()
+    if needsRecovery { recoverAfterSpaceChange() }
+  }
+
+  private func recoverAfterSpaceChange(retry: Int = 0) {
+    guard !ended, let window = window, window.isVisible, !window.isMiniaturized else { return }
+    guard window.isOnActiveSpace else {
+      // AppKit may post the Space-change notification before the window's
+      // active-Space membership settles. Retry briefly, then let the watchdog
+      // handle later visibility changes without keeping a retry loop alive.
+      if retry < 3 {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+          self?.recoverAfterSpaceChange(retry: retry + 1)
+        }
+      }
+      return
+    }
+    lock.lock()
+    // A Space-change can be the only reliable resume signal after AppKit hides
+    // the mini-window. If it is visible on the active Space again, the prior
+    // lifecycle pause is stale and must not block its new capture stream.
+    paused = false
+    recoveryEpoch += 1
+    activeStreamID = nil
+    hasValidFrame = false
+    captureState = "recovering"
+    lastFrameAt = 0
+    frameDeadline = ProcessInfo.processInfo.systemUptime + 5
+    desktop = nil
+    latest = nil
+    lock.unlock()
+    rebuildAttempts = 0
+    needsRebuild = true
+    refreshContent(rebuild: true)
+  }
+
+  private func checkFrameDeadline() {
+    let now = ProcessInfo.processInfo.systemUptime
+    lock.lock()
+    guard !ended, !paused, !hasValidFrame, frameDeadline > 0,
+          now >= frameDeadline else { lock.unlock(); return }
+    frameDeadline = 0
+    hasValidFrame = false
+    rebuildAttempts += 1
+    let exhausted = rebuildAttempts > 2
+    captureState = exhausted ? "failed" : "retrying"
+    failure = "No complete capture frame after recovery"
+    lock.unlock()
+    needsRebuild = !exhausted
+    retryAt = now + 1
   }
 
   private func reconcile() {
     guard !transitioning, let stream = stream else { return }
-    lock.lock(); let shouldRun = !ended && !paused && window?.isVisible == true && window?.isMiniaturized == false; lock.unlock()
+    lock.lock(); let isPaused = paused; let isEnded = ended; lock.unlock()
+    let shouldRun = !isEnded && !isPaused && window?.isVisible == true &&
+        window?.isMiniaturized == false && window?.isOnActiveSpace == true
+    if isPaused { lock.lock(); captureState = "paused"; hasValidFrame = false; lock.unlock() }
     guard !shouldRun || ProcessInfo.processInfo.systemUptime >= retryAt else { return }
     guard shouldRun != streaming else { return }
+    if shouldRun && rebuildAttempts > 2 {
+      lock.lock(); captureState = "failed"; hasValidFrame = false; lock.unlock()
+      return
+    }
     transitioning = true
     let completion: (Error?) -> Void = { [self] error in
       DispatchQueue.main.async {
         self.transitioning = false
         self.streaming = error == nil ? shouldRun : false
         if let error = error {
-          self.lock.lock(); self.failure = error.localizedDescription; self.lock.unlock()
+          self.rebuildAttempts += 1
+          self.lock.lock()
+          self.failure = error.localizedDescription
+          self.hasValidFrame = false
+          self.captureState = self.rebuildAttempts > 2 ? "failed" : "retrying"
+          self.frameDeadline = 0
+          self.lock.unlock()
           self.retryAt = ProcessInfo.processInfo.systemUptime + 1
+          self.needsRebuild = self.rebuildAttempts <= 2
         } else {
-          self.reconcile()
+          self.lock.lock()
+          self.hasValidFrame = false
+          self.captureState = isPaused ? "paused" : "waitingForFrame"
+          if shouldRun {
+            self.frameDeadline = ProcessInfo.processInfo.systemUptime + 5
+          }
+          self.lock.unlock()
         }
       }
     }
@@ -283,11 +394,17 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
 
   private func updateGeometry() {
     guard !ended, !updating, !transitioning,
-          ProcessInfo.processInfo.systemUptime >= retryAt, let stream = stream else { return }
+          ProcessInfo.processInfo.systemUptime >= retryAt else { return }
     if needsRebuild {
+      if rebuildAttempts > 2 {
+        lock.lock(); captureState = "failed"; hasValidFrame = false; lock.unlock()
+        needsRebuild = false
+        return
+      }
       refreshContent(rebuild: true)
       return
     }
+    guard let stream = stream else { return }
     do {
       let geometry = try makeGeometry()
       guard geometry.display.displayID != displayId ||
@@ -314,17 +431,45 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
         self.updateGeometry()
       }
     } catch {
-      lock.lock(); failure = error.localizedDescription; lock.unlock()
-      refreshContent(rebuild: false)
+      rebuildAttempts += 1
+      lock.lock()
+      failure = error.localizedDescription
+      hasValidFrame = false
+      captureState = rebuildAttempts > 2 ? "failed" : "retrying"
+      lock.unlock()
+      needsRebuild = rebuildAttempts <= 2
+      retryAt = ProcessInfo.processInfo.systemUptime + 1
+      if needsRebuild { refreshContent(rebuild: true) }
     }
   }
 
   private func refreshContent(rebuild: Bool) {
     guard !updating else { return }
     updating = true
+    let previousStream = rebuild ? stream : nil
+    if rebuild {
+      stream = nil
+      streaming = false
+      lock.lock()
+      activeStreamID = nil
+      recoveryEpoch += 1
+      hasValidFrame = false
+      captureState = "recovering"
+      frameDeadline = ProcessInfo.processInfo.systemUptime + 5
+      desktop = nil
+      latest = nil
+      lock.unlock()
+    }
     Task { @MainActor in
       defer { self.updating = false }
       do {
+        if let previousStream = previousStream {
+          try? previousStream.removeStreamOutput(self, type: .screen)
+          await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            previousStream.stopCapture { _ in continuation.resume() }
+          }
+        }
+        guard !self.ended else { return }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard !self.ended else { return }
         self.content = content
@@ -332,31 +477,48 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
           let geometry = try self.makeGeometry()
           let own = content.windows.filter { $0.windowID == CGWindowID(self.window!.windowNumber) }
           guard !own.isEmpty else { throw self.captureError("Cannot identify the own window") }
-          try? self.stream?.removeStreamOutput(self, type: .screen)
           let replacement = SCStream(filter: SCContentFilter(display: geometry.display, excludingWindows: own),
               configuration: geometry.config, delegate: self)
           try replacement.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.outputQueue)
           self.stream = replacement
+          self.lock.lock()
+          self.activeStreamID = ObjectIdentifier(replacement)
+          self.frameDeadline = ProcessInfo.processInfo.systemUptime + 5
+          self.lock.unlock()
           self.displayId = geometry.display.displayID
           self.displayOrigin = geometry.display.frame.origin
           self.displayPoints = geometry.display.frame.size
           let rect = self.windowRectInDisplay() ?? .zero
           self.lock.lock(); self.sampleRect = rect; self.lock.unlock()
           self.needsRebuild = false
-          self.streaming = false
-          // The rebuilt stream is not capturing yet; start it without waiting
-          // for the watchdog's next tick.
           self.reconcile()
         }
       } catch {
-        self.lock.lock(); self.failure = error.localizedDescription; self.lock.unlock()
+        self.rebuildAttempts += 1
+        self.lock.lock()
+        self.failure = error.localizedDescription
+        self.hasValidFrame = false
+        self.captureState = self.rebuildAttempts > 2 ? "failed" : "retrying"
+        self.lock.unlock()
+        self.needsRebuild = rebuild && self.rebuildAttempts <= 2
         self.retryAt = ProcessInfo.processInfo.systemUptime + 1
+        self.lock.lock(); self.frameDeadline = 0; self.lock.unlock()
       }
+      self.updating = false
+      if self.needsRebuild { self.updateGeometry() }
     }
   }
 
   func end() {
-    lock.lock(); let alreadyEnded = ended; ended = true; latest = nil; desktop = nil; lock.unlock()
+    lock.lock()
+    let alreadyEnded = ended
+    ended = true
+    activeStreamID = nil
+    hasValidFrame = false
+    captureState = "ended"
+    latest = nil
+    desktop = nil
+    lock.unlock()
     guard !alreadyEnded else { return }
     geometryTimer?.invalidate()
     geometryTimer = nil
@@ -364,6 +526,10 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
     watchdogTimer = nil
     for observer in observers { NotificationCenter.default.removeObserver(observer) }
     observers.removeAll()
+    for observer in workspaceObservers {
+      NSWorkspace.shared.notificationCenter.removeObserver(observer)
+    }
+    workspaceObservers.removeAll()
     registry.unregisterTexture(textureId)
     try? stream?.removeStreamOutput(self, type: .screen)
     reconcile()
@@ -372,25 +538,53 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
   func copyPixelBuffer() -> Unmanaged<CVPixelBuffer>? {
     // 时序关键点：在消费纹理时读取最新位置，勿移回捕获回调里预先裁剪。
     // 后者会提交按旧位置生成的图像，拖动时表现为背景落后一两帧。
-    lock.lock()
-    guard !ended, !paused, let image = desktop else { lock.unlock(); return nil }
-    let region = sampleRect
-    let version = frames
-    let previous = latest
-    lock.unlock()
-    // 桌面版本与位置必须同时相同才复用；静止桌面上的窗口移动仍需重新裁剪。
-    let unchanged = version == renderedVersion && region == renderedRect
-    let cropped = unchanged ? previous : renderCrop(image, region: region)
-    lock.lock()
-    guard !ended, !paused, let buffer = cropped ?? previous else { lock.unlock(); return nil }
-    latest = buffer
-    presented += 1
-    lock.unlock()
-    if cropped != nil {
+    // A move or a new ScreenCaptureKit frame can land while the GPU is cropping.
+    // Retry once with the newest snapshot; never submit a crop for an obsolete
+    // desktop frame or window position, which appears as a short drag afterimage.
+    for _ in 0..<2 {
+      lock.lock()
+      guard !ended, !paused, hasValidFrame, let image = desktop else {
+        lock.unlock()
+        return nil
+      }
+      let region = sampleRect
+      let version = frames
+      let epoch = recoveryEpoch
+      let previous = renderedEpoch == epoch ? latest : nil
+      lock.unlock()
+
+      if renderedEpoch != epoch {
+        renderedVersion = -1
+        renderedRect = .null
+        renderedEpoch = epoch
+      }
+      // Desktop version and position must both match to reuse a crop.
+      let unchanged = version == renderedVersion && region == renderedRect
+      let cropped = unchanged ? previous : renderCrop(image, region: region)
+
+      lock.lock()
+      guard !ended, !paused, recoveryEpoch == epoch, hasValidFrame else {
+        lock.unlock()
+        return nil
+      }
+      guard frames == version, sampleRect == region else {
+        staleCropDrops += 1
+        lock.unlock()
+        continue
+      }
+      guard let buffer = cropped else {
+        cropPoolMisses += 1
+        lock.unlock()
+        return nil
+      }
+      latest = buffer
+      presented += 1
+      lock.unlock()
       renderedVersion = version
       renderedRect = region
+      return Unmanaged.passRetained(buffer)
     }
-    return Unmanaged.passRetained(buffer)
+    return nil
   }
 
   func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
@@ -398,15 +592,52 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
     guard outputType == .screen, sampleBuffer.isValid,
           let attachment = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
           let status = attachment.first?[.status] as? Int,
-          status == SCFrameStatus.complete.rawValue,
           let image = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+    let statusName: String
+    switch status {
+    case SCFrameStatus.complete.rawValue: statusName = "complete"
+    case SCFrameStatus.idle.rawValue: statusName = "idle"
+    case SCFrameStatus.blank.rawValue: statusName = "blank"
+    case SCFrameStatus.suspended.rawValue: statusName = "suspended"
+    case SCFrameStatus.started.rawValue: statusName = "started"
+    case SCFrameStatus.stopped.rawValue: statusName = "stopped"
+    default: statusName = "unknown"
+    }
     lock.lock()
-    guard !ended, !paused else { lock.unlock(); return }
+    guard !ended, !paused, activeStreamID == ObjectIdentifier(stream) else { lock.unlock(); return }
+    lastFrameStatus = statusName
+    guard status == SCFrameStatus.complete.rawValue else {
+      if status == SCFrameStatus.blank.rawValue || status == SCFrameStatus.suspended.rawValue ||
+          status == SCFrameStatus.stopped.rawValue {
+        hasValidFrame = false
+        captureState = statusName == "stopped" ? "retrying" : "waitingForFrame"
+        if frameDeadline == 0 {
+          frameDeadline = ProcessInfo.processInfo.systemUptime + 5
+        }
+        desktop = nil
+        latest = nil
+      }
+      lock.unlock()
+      if status == SCFrameStatus.stopped.rawValue {
+        DispatchQueue.main.async { [weak self] in
+          self?.needsRebuild = true
+          self?.updateGeometry()
+        }
+      }
+      return
+    }
     desktop = image
     frames += 1
     failure = ""
+    hasValidFrame = true
+    captureState = "live"
+    lastFrameAt = ProcessInfo.processInfo.systemUptime
+    frameDeadline = 0
     let region = sampleRect
     lock.unlock()
+    DispatchQueue.main.async { [weak self] in
+      self?.rebuildAttempts = 0
+    }
     scheduleFrame()
 
     // 统计在捕获队列读取桌面区域，不持有裁剪缓冲，也不阻塞栅格线程取帧。
@@ -509,21 +740,39 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
   }
 
   func stream(_ stream: SCStream, didStopWithError error: Error) {
-    lock.lock(); failure = error.localizedDescription; lock.unlock()
+    lock.lock()
+    guard activeStreamID == ObjectIdentifier(stream), !ended else { lock.unlock(); return }
+    failure = error.localizedDescription
+    hasValidFrame = false
+    captureState = "retrying"
+    frameDeadline = 0
+    desktop = nil
+    latest = nil
+    lock.unlock()
     DispatchQueue.main.async { [weak self] in
       self?.streaming = false
-      self?.needsRebuild = true
-      self?.retryAt = ProcessInfo.processInfo.systemUptime + 1
+      guard let self = self else { return }
+      self.rebuildAttempts += 1
+      self.needsRebuild = self.rebuildAttempts <= 2
+      self.retryAt = ProcessInfo.processInfo.systemUptime + 1
+      if self.rebuildAttempts > 2 {
+        self.lock.lock(); self.captureState = "failed"; self.lock.unlock()
+      }
     }
   }
 
   func stats() -> [String: Any] {
     lock.lock(); defer { lock.unlock() }
+    let frameAgeMs = lastFrameAt > 0
+        ? (ProcessInfo.processInfo.systemUptime - lastFrameAt) * 1000 : -1
     var result: [String: Any] = ["active": !ended, "sessionId": id, "textureId": textureId,
             "frames": frames, "presented": presented, "changes": changes,
+            "cropPoolMisses": cropPoolMisses, "staleCropDrops": staleCropDrops,
             "elapsed": ProcessInfo.processInfo.systemUptime - started,
             "luminance": luminance, "error": failure, "paused": paused,
-            "selfExcluded": true]
+            "selfExcluded": true, "hasValidFrame": hasValidFrame,
+            "captureState": captureState, "recoveryEpoch": recoveryEpoch,
+            "lastFrameAgeMs": frameAgeMs, "lastFrameStatus": lastFrameStatus]
     result.merge(mappingInfo()) { _, new in new }
     return result
   }

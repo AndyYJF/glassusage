@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:ui' as ui;
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,6 +17,9 @@ import '../../domain/models/usage_models.dart';
 import '../providers/app_providers.dart';
 import '../widgets/charts.dart';
 import '../widgets/odometer.dart';
+
+double get _miniCornerRadius =>
+    defaultTargetPlatform == TargetPlatform.macOS ? 16.0 : 28.0;
 
 /// 显示用量小窗，并将实时画面的逐帧刷新交给原生外部纹理。
 ///
@@ -60,6 +64,8 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   bool _glassSuspended = false;
   bool _glassPaused = false;
   bool _readingStats = false;
+  Duration? _statsPollInterval;
+  String _captureState = 'connecting';
   String? _captureError;
   String? _shaderError;
   double _refraction = 32;
@@ -120,13 +126,21 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
       final nextTexture = _glass.session?.textureId;
       if (_textureId != nextTexture) {
         _hasLiveFrame = false;
+        _captureState = 'connecting';
         _lastElapsed = 0;
         _lastPresented = 0;
         _lastChanges = 0;
         _lastRenderedFrames = _renderedFrames;
         _rasterSamples.clear();
+        if (nextTexture == null) {
+          _statsTimer?.cancel();
+          _statsPollInterval = null;
+        }
       }
       _textureId = nextTexture;
+      _captureState =
+          _glass.currentStats?.captureState ??
+          (_glass.mode == DesktopGlassMode.frosted ? 'failed' : 'connecting');
       _captureError = _glass.reason;
       if (_glass.mode == DesktopGlassMode.frosted) {
         _lightBackdrop = !GlassTheme.of(context).isDark;
@@ -191,10 +205,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
       if (!mounted || _useScene) return;
       if (_glass.session == null) return;
       // 100ms 仅等待首帧；收到捕获帧后恢复到 1Hz，不用统计定时器驱动画面。
-      _statsTimer ??= Timer.periodic(
-        const Duration(milliseconds: 100),
-        (_) => _readStats(),
-      );
+      _setStatsPolling(const Duration(milliseconds: 100));
       await _readStats();
     } catch (error) {
       if (mounted) setState(() => _captureError = '$error');
@@ -207,25 +218,41 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
     }
   }
 
+  Future<void> _retryCapture() async {
+    await _glass.reconnect(shaderSupported: _liveShader != null);
+    if (!mounted || _glass.session == null) return;
+    _setStatsPolling(const Duration(milliseconds: 100));
+    await _readStats();
+  }
+
+  void _setStatsPolling(Duration interval) {
+    if (_statsPollInterval == interval && _statsTimer?.isActive == true) {
+      return;
+    }
+    _statsTimer?.cancel();
+    _statsPollInterval = interval;
+    _statsTimer = Timer.periodic(interval, (_) => _readStats());
+  }
+
   Future<void> _readStats() async {
     if (!mounted || _useScene || _readingStats) return;
     _readingStats = true;
     try {
       final stats = await _glass.refreshStats();
       if (!mounted || stats == null) return;
-      if (!_hasLiveFrame && stats.frames > 0) {
-        _statsTimer?.cancel();
-        _statsTimer = Timer.periodic(
-          const Duration(seconds: 1),
-          (_) => _readStats(),
-        );
-      }
+      _setStatsPolling(
+        stats.hasValidFrame
+            ? const Duration(seconds: 1)
+            : const Duration(milliseconds: 100),
+      );
       final elapsed = stats.elapsed;
       final presented = stats.presented;
       final delta = elapsed - _lastElapsed;
       setState(() {
         // frames 是捕获端计数；不能等 presented，纹理显示前还没有取帧回调。
-        _hasLiveFrame = stats.frames > 0;
+        if (!stats.paused && _glassPaused) _glassPaused = false;
+        _hasLiveFrame = stats.hasValidFrame;
+        _captureState = stats.captureState;
         _fps = delta > 0 ? (presented - _lastPresented) / delta : 0;
         _idle = stats.changes == _lastChanges;
         final luminance = stats.luminance;
@@ -288,7 +315,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         _liveShader != null &&
         _glass.mode == DesktopGlassMode.realtime;
     return ClipRRect(
-      borderRadius: BorderRadius.circular(28),
+      borderRadius: BorderRadius.circular(_miniCornerRadius),
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -336,7 +363,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
             child: Container(
               constraints: const BoxConstraints.expand(),
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(28),
+                borderRadius: BorderRadius.circular(_miniCornerRadius),
                 border: Border.all(
                   color: Colors.white.withValues(alpha: 0.65),
                   width: 1.2,
@@ -595,7 +622,13 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
                             ? '测试背景 · 非桌面实时折射'
                             : 'Test scene · not live desktop')
                       : !_hasLiveFrame
-                      ? (i18n.isZh ? '正在连接实时桌面…' : 'Connecting live desktop…')
+                      ? (_captureState == 'recovering' ||
+                                _captureState == 'waitingForFrame' ||
+                                _captureState == 'retrying'
+                            ? (i18n.isZh ? '正在恢复桌面…' : 'Restoring desktop…')
+                            : i18n.isZh
+                            ? '正在连接实时桌面…'
+                            : 'Connecting live desktop…')
                       : _idle
                       ? (i18n.isZh ? '实时桌面 · 静止待命' : 'Live desktop · idle')
                       : (i18n.isZh
@@ -612,8 +645,17 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
                 onPressed: _busy
                     ? null
                     : () {
-                        setState(() => _useScene = false);
-                        unawaited(_refresh());
+                        final retry = _captureState == 'failed';
+                        setState(() {
+                          _useScene = false;
+                          _captureState = 'connecting';
+                          _hasLiveFrame = false;
+                        });
+                        if (retry) {
+                          unawaited(_retryCapture());
+                        } else {
+                          unawaited(_refresh());
+                        }
                       },
                 style: TextButton.styleFrom(
                   foregroundColor: _foreground,
@@ -623,6 +665,8 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
                 child: Text(
                   _busy
                       ? (i18n.isZh ? '连接中…' : 'Connecting…')
+                      : _captureState == 'failed'
+                      ? (i18n.isZh ? '重试' : 'Retry')
                       : (i18n.isZh ? '实时桌面' : 'Live desktop'),
                   style: TextStyle(fontSize: 10),
                 ),
@@ -715,7 +759,9 @@ class _DesktopGlassSurface extends StatelessWidget {
       if (refraction == 0 && chromatic == 0) return texture;
       final dpr = MediaQuery.devicePixelRatioOf(context);
       final size = constraints.biggest * dpr;
-      final radius = (size.shortestSide / 2).clamp(0.0, 28 * dpr).toDouble();
+      final radius = (size.shortestSide / 2)
+          .clamp(0.0, _miniCornerRadius * dpr)
+          .toDouble();
       // u_size (0..1) and sampler are supplied by ImageFilter.shader. All shape
       // geometry is physical pixels, exactly once, as in the supplied experiment.
       final values = <double>[
@@ -779,7 +825,9 @@ class _MiniGlassPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
     if (shader != null && image != null) {
-      final radius = (size.shortestSide / 2).clamp(0.0, 28.0).toDouble();
+      final radius = (size.shortestSide / 2)
+          .clamp(0.0, _miniCornerRadius)
+          .toDouble();
       final values = <double>[
         size.width,
         size.height,
