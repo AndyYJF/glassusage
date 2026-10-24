@@ -539,9 +539,9 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
     // 时序关键点：在消费纹理时读取最新位置，勿移回捕获回调里预先裁剪。
     // 后者会提交按旧位置生成的图像，拖动时表现为背景落后一两帧。
     // A move or a new ScreenCaptureKit frame can land while the GPU is cropping.
-    // Retry once with the newest snapshot; never submit a crop for an obsolete
-    // desktop frame or window position, which appears as a short drag afterimage.
-    for _ in 0..<2 {
+    // Retry once with the newest snapshot. A newer desktop frame may wait for
+    // the next copy, but a crop for an old window position must never be used.
+    for attempt in 0..<2 {
       lock.lock()
       guard !ended, !paused, hasValidFrame, let image = desktop else {
         lock.unlock()
@@ -550,7 +550,7 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
       let region = sampleRect
       let version = frames
       let epoch = recoveryEpoch
-      let previous = renderedEpoch == epoch ? latest : nil
+      let previous = renderedEpoch == epoch && renderedRect == region ? latest : nil
       lock.unlock()
 
       if renderedEpoch != epoch {
@@ -567,21 +567,35 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
         lock.unlock()
         return nil
       }
-      guard frames == version, sampleRect == region else {
+      let moved = sampleRect != region
+      let raced = frames != version || moved
+      if moved || (raced && attempt == 0) {
         staleCropDrops += 1
         lock.unlock()
+        if attempt == 1 { scheduleFrame() }
         continue
       }
-      guard let buffer = cropped else {
+      guard let buffer = cropped ?? previous else {
         cropPoolMisses += 1
         lock.unlock()
+        scheduleFrame()
         return nil
+      }
+      if cropped == nil {
+        cropPoolMisses += 1
       }
       latest = buffer
       presented += 1
       lock.unlock()
-      renderedVersion = version
-      renderedRect = region
+      // A pool fallback still contains the previous desktop frame. Keep its
+      // version so the next copy retries the crop instead of caching it as new.
+      if cropped != nil {
+        renderedVersion = version
+        renderedRect = region
+      }
+      if raced || cropped == nil {
+        scheduleFrame()
+      }
       return Unmanaged.passRetained(buffer)
     }
     return nil
