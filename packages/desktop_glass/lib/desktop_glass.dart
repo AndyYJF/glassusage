@@ -62,6 +62,12 @@ class GlassStats {
       elapsed = (data['elapsed'] as num?)?.toDouble() ?? 0,
       luminance = (data['luminance'] as num?)?.toDouble() ?? 0,
       paused = data['paused'] == true,
+      hasValidFrame =
+          data['hasValidFrame'] as bool? ??
+          ((data['frames'] as num?)?.toInt() ?? 0) > 0,
+      captureState = data['captureState'] as String? ?? 'unknown',
+      recoveryEpoch = (data['recoveryEpoch'] as num?)?.toInt() ?? 0,
+      lastFrameAgeMs = (data['lastFrameAgeMs'] as num?)?.toDouble(),
       textureOriginX = (data['textureOriginX'] as num?)?.toDouble() ?? 0,
       textureOriginY = (data['textureOriginY'] as num?)?.toDouble() ?? 0,
       textureScale = (data['textureScale'] as num?)?.toDouble() ?? 1,
@@ -78,6 +84,10 @@ class GlassStats {
   final double elapsed;
   final double luminance;
   final bool paused;
+  final bool hasValidFrame;
+  final String captureState;
+  final int recoveryEpoch;
+  final double? lastFrameAgeMs;
   final double textureOriginX;
   final double textureOriginY;
   final double textureScale;

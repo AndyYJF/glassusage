@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:ui' as ui;
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,6 +17,9 @@ import '../../domain/models/usage_models.dart';
 import '../providers/app_providers.dart';
 import '../widgets/charts.dart';
 import '../widgets/odometer.dart';
+
+double get _miniCornerRadius =>
+    defaultTargetPlatform == TargetPlatform.macOS ? 16.0 : 28.0;
 
 /// 显示用量小窗，并将实时画面的逐帧刷新交给原生外部纹理。
 ///
@@ -43,8 +47,6 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   int _lastRenderedFrames = 0;
   double _maxRasterMs = 0;
   final List<double> _rasterSamples = [];
-  int _lastChanges = 0;
-  bool _idle = false;
   bool _lightBackdrop = false;
   Color get _foreground =>
       _lightBackdrop ? const Color(0xff182235) : Colors.white;
@@ -60,8 +62,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   bool _glassSuspended = false;
   bool _glassPaused = false;
   bool _readingStats = false;
-  String? _captureError;
-  String? _shaderError;
+  Duration? _statsPollInterval;
   double _refraction = 32;
   double _chromatic = 1.2;
 
@@ -122,12 +123,14 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         _hasLiveFrame = false;
         _lastElapsed = 0;
         _lastPresented = 0;
-        _lastChanges = 0;
         _lastRenderedFrames = _renderedFrames;
         _rasterSamples.clear();
+        if (nextTexture == null) {
+          _statsTimer?.cancel();
+          _statsPollInterval = null;
+        }
       }
       _textureId = nextTexture;
-      _captureError = _glass.reason;
       if (_glass.mode == DesktopGlassMode.frosted) {
         _lightBackdrop = !GlassTheme.of(context).isDark;
       }
@@ -164,7 +167,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         });
       }
     } catch (error) {
-      if (mounted) setState(() => _shaderError = '$error');
+      debugPrint('Mini-window shader unavailable: $error');
     }
     final recorder = ui.PictureRecorder();
     const _MiniScenePainter().paint(Canvas(recorder), const Size(432, 300));
@@ -191,13 +194,10 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
       if (!mounted || _useScene) return;
       if (_glass.session == null) return;
       // 100ms 仅等待首帧；收到捕获帧后恢复到 1Hz，不用统计定时器驱动画面。
-      _statsTimer ??= Timer.periodic(
-        const Duration(milliseconds: 100),
-        (_) => _readStats(),
-      );
+      _setStatsPolling(const Duration(milliseconds: 100));
       await _readStats();
     } catch (error) {
-      if (mounted) setState(() => _captureError = '$error');
+      debugPrint('Mini-window capture error: $error');
     } finally {
       if (mounted) setState(() => _busy = false);
       if (_refreshPending) {
@@ -207,31 +207,37 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
     }
   }
 
+  void _setStatsPolling(Duration interval) {
+    if (_statsPollInterval == interval && _statsTimer?.isActive == true) {
+      return;
+    }
+    _statsTimer?.cancel();
+    _statsPollInterval = interval;
+    _statsTimer = Timer.periodic(interval, (_) => _readStats());
+  }
+
   Future<void> _readStats() async {
     if (!mounted || _useScene || _readingStats) return;
     _readingStats = true;
     try {
       final stats = await _glass.refreshStats();
       if (!mounted || stats == null) return;
-      if (!_hasLiveFrame && stats.frames > 0) {
-        _statsTimer?.cancel();
-        _statsTimer = Timer.periodic(
-          const Duration(seconds: 1),
-          (_) => _readStats(),
-        );
-      }
+      _setStatsPolling(
+        stats.hasValidFrame
+            ? const Duration(seconds: 1)
+            : const Duration(milliseconds: 100),
+      );
       final elapsed = stats.elapsed;
       final presented = stats.presented;
       final delta = elapsed - _lastElapsed;
       setState(() {
         // frames 是捕获端计数；不能等 presented，纹理显示前还没有取帧回调。
-        _hasLiveFrame = stats.frames > 0;
+        if (!stats.paused && _glassPaused) _glassPaused = false;
+        _hasLiveFrame = stats.hasValidFrame;
         _fps = delta > 0 ? (presented - _lastPresented) / delta : 0;
-        _idle = stats.changes == _lastChanges;
         final luminance = stats.luminance;
         if (luminance > 0.62) _lightBackdrop = true;
         if (luminance < 0.42) _lightBackdrop = false;
-        _captureError = stats.error;
       });
       if (const bool.fromEnvironment('LIVE_GLASS_METRICS')) {
         debugPrint(
@@ -241,11 +247,10 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
       _lastRenderedFrames = _renderedFrames;
       _maxRasterMs = 0;
       _rasterSamples.clear();
-      _lastChanges = stats.changes;
       _lastElapsed = elapsed;
       _lastPresented = presented;
     } catch (error) {
-      if (mounted) setState(() => _captureError = '$error');
+      debugPrint('Mini-window capture error: $error');
     } finally {
       _readingStats = false;
     }
@@ -288,7 +293,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         _liveShader != null &&
         _glass.mode == DesktopGlassMode.realtime;
     return ClipRRect(
-      borderRadius: BorderRadius.circular(28),
+      borderRadius: BorderRadius.circular(_miniCornerRadius),
       child: Stack(
         fit: StackFit.expand,
         children: [
@@ -313,17 +318,11 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
           if (useLive)
             DecoratedBox(
               decoration: BoxDecoration(
-                gradient: LinearGradient(
+                gradient: const LinearGradient(
                   colors: [
-                    _lightBackdrop
-                        ? const Color(0x15ffffff)
-                        : const Color(0x15101930),
-                    _lightBackdrop
-                        ? const Color(0x25ffffff)
-                        : const Color(0x40101930),
-                    _lightBackdrop
-                        ? const Color(0x35ffffff)
-                        : const Color(0x60101930),
+                    Color(0x0A000000),
+                    Color(0x14000000),
+                    Color(0x1F000000),
                   ],
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
@@ -336,10 +335,10 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
             child: Container(
               constraints: const BoxConstraints.expand(),
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(28),
+                borderRadius: BorderRadius.circular(_miniCornerRadius),
                 border: Border.all(
-                  color: Colors.white.withValues(alpha: 0.65),
-                  width: 1.2,
+                  color: Colors.white.withValues(alpha: 0.20),
+                  width: 0.5,
                 ),
               ),
               padding: EdgeInsets.symmetric(
@@ -573,63 +572,6 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
           (value) => setState(() => _chromatic = value),
           (value) => controller.patchSettings({'widgetChromatic': value}),
         ),
-        Row(
-          children: [
-            Expanded(
-              child: Tooltip(
-                message:
-                    _shaderError ??
-                    _captureError ??
-                    (i18n.isZh
-                        ? '实时桌面折射；纹理提交 ${_fps.toStringAsFixed(0)} 次/秒，仅用于诊断，不代表显示帧率'
-                        : 'Live desktop refraction; ${_fps.toStringAsFixed(0)} texture submissions/s, a diagnostic count rather than display FPS'),
-                child: Text(
-                  _shaderError != null
-                      ? (i18n.isZh ? '折射不可用' : 'Lens unavailable')
-                      : !_useScene && _glass.mode == DesktopGlassMode.frosted
-                      ? (i18n.isZh
-                            ? '磨砂模式 · 实时折射不可用'
-                            : 'Frosted · live refraction unavailable')
-                      : _useScene
-                      ? (i18n.isZh
-                            ? '测试背景 · 非桌面实时折射'
-                            : 'Test scene · not live desktop')
-                      : !_hasLiveFrame
-                      ? (i18n.isZh ? '正在连接实时桌面…' : 'Connecting live desktop…')
-                      : _idle
-                      ? (i18n.isZh ? '实时桌面 · 静止待命' : 'Live desktop · idle')
-                      : (i18n.isZh
-                            ? '实时桌面 · 连续刷新'
-                            : 'Live desktop · continuous'),
-                  style: TextStyle(fontSize: 10, color: _secondary),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ),
-            SizedBox(
-              height: 26,
-              child: TextButton(
-                onPressed: _busy
-                    ? null
-                    : () {
-                        setState(() => _useScene = false);
-                        unawaited(_refresh());
-                      },
-                style: TextButton.styleFrom(
-                  foregroundColor: _foreground,
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  minimumSize: Size.zero,
-                ),
-                child: Text(
-                  _busy
-                      ? (i18n.isZh ? '连接中…' : 'Connecting…')
-                      : (i18n.isZh ? '实时桌面' : 'Live desktop'),
-                  style: TextStyle(fontSize: 10),
-                ),
-              ),
-            ),
-          ],
-        ),
       ],
     );
   }
@@ -715,7 +657,9 @@ class _DesktopGlassSurface extends StatelessWidget {
       if (refraction == 0 && chromatic == 0) return texture;
       final dpr = MediaQuery.devicePixelRatioOf(context);
       final size = constraints.biggest * dpr;
-      final radius = (size.shortestSide / 2).clamp(0.0, 28 * dpr).toDouble();
+      final radius = (size.shortestSide / 2)
+          .clamp(0.0, _miniCornerRadius * dpr)
+          .toDouble();
       // u_size (0..1) and sampler are supplied by ImageFilter.shader. All shape
       // geometry is physical pixels, exactly once, as in the supplied experiment.
       final values = <double>[
@@ -737,11 +681,11 @@ class _DesktopGlassSurface extends StatelessWidget {
         0.52,
         0.65,
         0.95,
-        0.06,
+        0, // No blue tint on the live desktop.
         1,
         1,
         1,
-        0.13,
+        0, // No white surface overlay on the live desktop.
         0,
         0,
         0,
@@ -753,10 +697,9 @@ class _DesktopGlassSurface extends StatelessWidget {
       return ImageFiltered(
         key: ValueKey((refraction, chromatic, size)),
         imageFilter: ui.ImageFilter.shader(shader),
-        child: ImageFiltered(
-          imageFilter: ui.ImageFilter.blur(sigmaX: 0.8, sigmaY: 0.8),
-          child: texture,
-        ),
+        // Keep the shader input window-sized; blur outsets expose a bright
+        // strip along the right and bottom edges of the native material.
+        child: texture,
       );
     },
   );
@@ -779,7 +722,9 @@ class _MiniGlassPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
     if (shader != null && image != null) {
-      final radius = (size.shortestSide / 2).clamp(0.0, 28.0).toDouble();
+      final radius = (size.shortestSide / 2)
+          .clamp(0.0, _miniCornerRadius)
+          .toDouble();
       final values = <double>[
         size.width,
         size.height,
