@@ -1,6 +1,8 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <mmsystem.h>
+#include <commctrl.h>
 
 #include "flutter/generated_plugin_registrant.h"
 #include "resource.h"
@@ -9,6 +11,8 @@ namespace {
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kWmTrayIcon = WM_USER + 100;
 constexpr int kHotkeyIdToggle = 1;
+constexpr UINT_PTR kMiniDragTimer = 0x4755;
+constexpr UINT_PTR kMiniDragSubclass = 0x4756;
 
 constexpr UINT kMenuIdOpen = 1001;
 constexpr UINT kMenuIdWidget = 1002;
@@ -39,6 +43,9 @@ bool FlutterWindow::OnCreate() {
   }
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
+  SetWindowSubclass(flutter_controller_->view()->GetNativeWindow(),
+                    MiniDragViewProc, kMiniDragSubclass,
+                    reinterpret_cast<DWORD_PTR>(this));
 
   win32_channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
@@ -63,6 +70,7 @@ bool FlutterWindow::OnCreate() {
                               WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS |
                               (main_style_ & WS_VISIBLE));
             } else {
+              StopMiniDrag(hwnd, false);
               SetWindowLongPtr(hwnd, GWL_STYLE, main_style_);
               SetWindowRgn(hwnd, nullptr, TRUE);
             }
@@ -71,6 +79,25 @@ bool FlutterWindow::OnCreate() {
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
                          SWP_NOACTIVATE | SWP_FRAMECHANGED);
             UpdateMiniRegion(hwnd);
+          }
+          result->Success();
+        } else if (call.method_name() == "startMiniDragging") {
+          POINT cursor{};
+          RECT bounds{};
+          if (mini_mode_ && (GetAsyncKeyState(VK_LBUTTON) & 0x8000) &&
+              GetCursorPos(&cursor) && GetWindowRect(hwnd, &bounds)) {
+            StopMiniDrag(hwnd, false);
+            drag_cursor_ = cursor;
+            drag_window_ = POINT{bounds.left, bounds.top};
+            mini_drag_moved_ = false;
+            mini_timer_resolution_ = timeBeginPeriod(1) == TIMERR_NOERROR;
+            mini_dragging_ = SetTimer(hwnd, kMiniDragTimer, 5, nullptr) != 0;
+            if (!mini_dragging_) {
+              if (mini_timer_resolution_) timeEndPeriod(1);
+              mini_timer_resolution_ = false;
+              result->Error("dragUnavailable", "Cannot start mini window drag timer");
+              return;
+            }
           }
           result->Success();
         } else {
@@ -90,6 +117,43 @@ bool FlutterWindow::OnCreate() {
   flutter_controller_->ForceRedraw();
 
   return true;
+}
+
+void FlutterWindow::StopMiniDrag(HWND hwnd, bool notify) {
+  if (!mini_dragging_) return;
+  KillTimer(hwnd, kMiniDragTimer);
+  if (mini_timer_resolution_) timeEndPeriod(1);
+  mini_timer_resolution_ = false;
+  mini_dragging_ = false;
+  if (notify && mini_drag_moved_) NotifyDartEvent("window:mini-drag-ended");
+}
+
+void FlutterWindow::UpdateMiniDrag(HWND hwnd) {
+  POINT cursor{};
+  if (!mini_dragging_ || !IsWindowVisible(hwnd) || !GetCursorPos(&cursor)) return;
+  const int x = drag_window_.x + cursor.x - drag_cursor_.x;
+  const int y = drag_window_.y + cursor.y - drag_cursor_.y;
+  RECT bounds{};
+  if (GetWindowRect(hwnd, &bounds) && (x != bounds.left || y != bounds.top)) {
+    SetWindowPos(hwnd, nullptr, x, y, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    mini_drag_moved_ = true;
+  }
+}
+
+LRESULT CALLBACK FlutterWindow::MiniDragViewProc(HWND hwnd, UINT message,
+    WPARAM wparam, LPARAM lparam, UINT_PTR, DWORD_PTR data) {
+  auto* self = reinterpret_cast<FlutterWindow*>(data);
+  if (self && self->mini_dragging_) {
+    if (message == WM_MOUSEMOVE || message == WM_LBUTTONUP) {
+      self->UpdateMiniDrag(self->GetHandle());
+    }
+    if (message == WM_LBUTTONUP || message == WM_CANCELMODE ||
+        message == WM_CAPTURECHANGED) {
+      self->StopMiniDrag(self->GetHandle(), true);
+    }
+  }
+  return DefSubclassProc(hwnd, message, wparam, lparam);
 }
 
 void FlutterWindow::UpdateMiniRegion(HWND hwnd) {
@@ -173,6 +237,11 @@ void FlutterWindow::NotifyDartEvent(const std::string& event_name) {
 }
 
 void FlutterWindow::OnDestroy() {
+  StopMiniDrag(GetHandle(), false);
+  if (flutter_controller_ && flutter_controller_->view()) {
+    RemoveWindowSubclass(flutter_controller_->view()->GetNativeWindow(),
+                         MiniDragViewProc, kMiniDragSubclass);
+  }
   win32_channel_.reset();
   RemoveTrayAndHotkey(GetHandle());
   if (flutter_controller_) {
@@ -186,6 +255,13 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == WM_TIMER && wparam == kMiniDragTimer && mini_dragging_) {
+    UpdateMiniDrag(hwnd);
+    if (!(GetAsyncKeyState(VK_LBUTTON) & 0x8000) || !IsWindowVisible(hwnd)) {
+      StopMiniDrag(hwnd, true);
+    }
+    return 0;
+  }
   // window_manager's hidden title bar reserves resize borders. A mini popup
   // uses the entire rectangle, matching Flutter's rounded glass surface.
   if (mini_mode_ && message == WM_NCCALCSIZE) return 0;

@@ -32,7 +32,9 @@ class DesktopGlassController extends ChangeNotifier {
         reason = 'shaderUnsupported';
         mode = DesktopGlassMode.frosted;
       } else {
-        final started = await backend.start();
+        final started = await backend.start(
+          targetFps: defaultTargetPlatform == TargetPlatform.windows ? 240 : 60,
+        );
         if (_disposed || generation != _generation) {
           await backend.stop(started.id);
           return;

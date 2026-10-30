@@ -24,6 +24,17 @@ class DesktopGlassPlugin : public flutter::Plugin {
  public:
   explicit DesktopGlassPlugin(flutter::PluginRegistrarWindows* registrar)
       : registrar_(registrar) {
+    window_proc_id_ = registrar_->RegisterTopLevelWindowProcDelegate(
+        [this](HWND, UINT message, WPARAM, LPARAM lparam) -> std::optional<LRESULT> {
+          if (message == WM_WINDOWPOSCHANGED && capture_) {
+            const auto* pos = reinterpret_cast<const WINDOWPOS*>(lparam);
+            if (pos && ((pos->flags & SWP_NOMOVE) == 0 ||
+                        (pos->flags & SWP_NOSIZE) == 0)) {
+              capture_->NotifyWindowMoved();
+            }
+          }
+          return std::nullopt;
+        });
     channel_ = std::make_unique<flutter::MethodChannel<V>>(
         registrar->messenger(), "glassusage/desktop_glass",
         &flutter::StandardMethodCodec::GetInstance());
@@ -38,8 +49,8 @@ class DesktopGlassPlugin : public flutter::Plugin {
         result->Success(V(data));
       } else if (method == "start") {
         const int64_t fps = IntegerArgument(call, "targetFps", 60);
-        if (fps < 1 || fps > 60) {
-          result->Error("argument", "targetFps must be between 1 and 60");
+        if (fps < 1 || fps > 240) {
+          result->Error("argument", "targetFps must be between 1 and 240");
           return;
         }
         capture_.reset();
@@ -77,8 +88,13 @@ class DesktopGlassPlugin : public flutter::Plugin {
     });
   }
 
+  ~DesktopGlassPlugin() override {
+    registrar_->UnregisterTopLevelWindowProcDelegate(window_proc_id_);
+  }
+
  private:
   flutter::PluginRegistrarWindows* registrar_;
+  int window_proc_id_ = -1;
   std::unique_ptr<flutter::MethodChannel<V>> channel_;
   std::unique_ptr<MiniDesktopCapture> capture_;
   int64_t session_id_ = 0;
