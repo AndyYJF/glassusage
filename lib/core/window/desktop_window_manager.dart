@@ -26,9 +26,6 @@ class DesktopWindowManager extends WindowListener {
   static const MethodChannel _macWindowChannel = MethodChannel(
     'glassusage/desktop_window',
   );
-  static const MethodChannel _windowManagerChannel = MethodChannel(
-    'window_manager',
-  );
   final StreamController<String> _events = StreamController.broadcast();
 
   Stream<String> get events => _events.stream;
@@ -72,6 +69,7 @@ class DesktopWindowManager extends WindowListener {
   Future<dynamic> _handleRunnerEvent(MethodCall call) async {
     if (call.method == 'onWin32Event') {
       final event = call.arguments as String?;
+      if (event == 'window:mini-drag-ended') onWindowMoved();
       if (event != null && !_events.isClosed) _events.add(event);
     }
   }
@@ -192,9 +190,8 @@ class DesktopWindowManager extends WindowListener {
     _snapTimer?.cancel();
     _snapTimer = null;
     if (Platform.isWindows && _miniMode) {
-      // Mini mode cannot be fullscreen; call the plugin method directly to
-      // avoid its extra isFullScreen platform-channel round trip.
-      await _windowManagerChannel.invokeMethod<void>('startDragging');
+      // Keep the platform message loop available while the mini window moves.
+      await _channel.invokeMethod<void>('startMiniDragging');
       return;
     }
     if (Platform.isMacOS && _miniMode) {

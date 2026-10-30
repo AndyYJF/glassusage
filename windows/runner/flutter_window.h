@@ -31,8 +31,17 @@ class FlutterWindow : public Win32Window {
   void ShowTrayContextMenu(HWND hwnd);
   void NotifyDartEvent(const std::string& event_name);
   void UpdateMiniRegion(HWND hwnd);
+  void StopMiniDrag(HWND hwnd, bool notify);
+  void UpdateMiniDrag(HWND hwnd);
+  static LRESULT CALLBACK MiniDragViewProc(HWND hwnd, UINT message,
+      WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR data);
 
   bool mini_mode_ = false;
+  bool mini_dragging_ = false;
+  bool mini_timer_resolution_ = false;
+  bool mini_drag_moved_ = false;
+  POINT drag_cursor_{};
+  POINT drag_window_{};
   LONG_PTR main_style_ = 0;
 
   // The project to run.

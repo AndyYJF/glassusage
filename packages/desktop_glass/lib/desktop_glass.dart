@@ -134,11 +134,12 @@ class DesktopGlass {
   }
 
   Future<GlassSession> start({int targetFps = 60}) async {
-    if (targetFps < 1 || targetFps > 60) {
+    final maxFps = defaultTargetPlatform == TargetPlatform.windows ? 240 : 60;
+    if (targetFps < 1 || targetFps > maxFps) {
       throw ArgumentError.value(
         targetFps,
         'targetFps',
-        'Must be between 1 and 60',
+        'Must be between 1 and $maxFps',
       );
     }
     final data = await _channel.invokeMapMethod<String, dynamic>('start', {

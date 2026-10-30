@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui;
 
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -63,15 +62,12 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   bool _glassPaused = false;
   bool _readingStats = false;
   Duration? _statsPollInterval;
-  double _refraction = 32;
-  double _chromatic = 1.2;
+  static const double _refraction = 15;
+  static const double _chromatic = 0.1;
 
   @override
   void initState() {
     super.initState();
-    final saved = ref.read(appSettingsProvider);
-    _refraction = saved.widgetRefraction.clamp(0.0, 60.0).toDouble();
-    _chromatic = saved.widgetChromatic.clamp(0.0, 4.0).toDouble();
     WidgetsBinding.instance.addObserver(this);
     _glass.addListener(_onGlassChanged);
     SchedulerBinding.instance.addTimingsCallback(_recordTimings);
@@ -557,21 +553,6 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
             ),
           ],
         ),
-        const SizedBox(height: 6),
-        _slider(
-          i18n.isZh ? '折射' : 'Lens',
-          _refraction,
-          60,
-          (value) => setState(() => _refraction = value),
-          (value) => controller.patchSettings({'widgetRefraction': value}),
-        ),
-        _slider(
-          i18n.isZh ? '色散' : 'RGB',
-          _chromatic,
-          4,
-          (value) => setState(() => _chromatic = value),
-          (value) => controller.patchSettings({'widgetChromatic': value}),
-        ),
       ],
     );
   }
@@ -588,47 +569,6 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   void _startDragging() {
     unawaited(DesktopWindowManager.instance.startDragging());
   }
-
-  Widget _slider(
-    String label,
-    double value,
-    double max,
-    ValueChanged<double> change,
-    ValueChanged<double> persist,
-  ) => SizedBox(
-    height: 28,
-    child: Row(
-      children: [
-        SizedBox(
-          width: 32,
-          child: Text(label, style: TextStyle(fontSize: 10, color: _secondary)),
-        ),
-        Expanded(
-          // 合并时保留无 OverlayPortal 的滑块：Material Slider 曾产生孤立 AX 节点，
-          // 返回主界面时在 AccessibilityBridge 崩溃；此处仍保留滑块语义与交互。
-          child: Semantics(
-            label: label,
-            child: CupertinoSlider(
-              value: value,
-              min: 0,
-              max: max,
-              activeColor: _foreground,
-              thumbColor: _foreground,
-              onChanged: _shader == null ? null : change,
-              onChangeEnd: _shader == null ? null : persist,
-            ),
-          ),
-        ),
-        SizedBox(
-          width: 26,
-          child: Text(
-            value.toStringAsFixed(1),
-            style: TextStyle(fontSize: 10, color: _secondary),
-          ),
-        ),
-      ],
-    ),
-  );
 }
 
 /// Filter the live texture directly, as in the initial Windows implementation.
