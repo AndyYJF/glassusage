@@ -30,10 +30,17 @@ class FlutterWindow : public Win32Window {
   void RemoveTrayAndHotkey(HWND hwnd);
   void ShowTrayContextMenu(HWND hwnd);
   void NotifyDartEvent(const std::string& event_name);
-  void UpdateMiniRegion(HWND hwnd);
+  flutter::EncodableMap MiniGeometry();
+  void UpdateMiniHitTest(POINT cursor);
+  void StopMiniHost();
+  static LRESULT CALLBACK MiniMouseHook(int code, WPARAM wparam, LPARAM lparam);
 
   bool mini_mode_ = false;
   LONG_PTR main_style_ = 0;
+  LONG_PTR main_ex_style_ = 0;
+  RECT mini_card_{};  // Physical pixels relative to the fixed host.
+  HHOOK mini_mouse_hook_ = nullptr;
+  static FlutterWindow* mini_host_;
 
   // The project to run.
   flutter::DartProject project_;

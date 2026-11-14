@@ -65,10 +65,19 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
   Duration? _statsPollInterval;
   double _refraction = 32;
   double _chromatic = 1.2;
+  Offset? _dragCardStart;
+  Offset? _dragPointerStart;
+
+  void _onMiniBoundsChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   void initState() {
     super.initState();
+    DesktopWindowManager.instance.miniCardBounds.addListener(
+      _onMiniBoundsChanged,
+    );
     final saved = ref.read(appSettingsProvider);
     _refraction = saved.widgetRefraction.clamp(0.0, 60.0).toDouble();
     _chromatic = saved.widgetChromatic.clamp(0.0, 4.0).toDouble();
@@ -258,6 +267,9 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
 
   @override
   void dispose() {
+    DesktopWindowManager.instance.miniCardBounds.removeListener(
+      _onMiniBoundsChanged,
+    );
     WidgetsBinding.instance.removeObserver(this);
     _glass.removeListener(_onGlassChanged);
     _glass.dispose();
@@ -292,7 +304,9 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         _textureId != null &&
         _liveShader != null &&
         _glass.mode == DesktopGlassMode.realtime;
-    return ClipRRect(
+    final bounds = DesktopWindowManager.instance.miniCardBounds.value;
+    final hostSize = MediaQuery.sizeOf(context);
+    final card = ClipRRect(
       borderRadius: BorderRadius.circular(_miniCornerRadius),
       child: Stack(
         fit: StackFit.expand,
@@ -301,6 +315,8 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
             _DesktopGlassSurface(
               shader: _liveShader!,
               textureId: _textureId!,
+              desktopSize: bounds == null ? null : hostSize,
+              desktopOffset: bounds?.topLeft ?? Offset.zero,
               refraction: _refraction,
               chromatic: _chromatic,
             )
@@ -331,7 +347,23 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
             ),
           GestureDetector(
             behavior: HitTestBehavior.translucent,
-            onPanStart: (_) => _startDragging(),
+            onPanStart: (details) {
+              if (bounds == null) {
+                _startDragging();
+              } else {
+                _dragCardStart = bounds.topLeft;
+                _dragPointerStart = details.globalPosition;
+              }
+            },
+            onPanUpdate: (details) {
+              if (_dragCardStart == null || _dragPointerStart == null) return;
+              DesktopWindowManager.instance.moveMiniCard(
+                _dragCardStart! + details.globalPosition - _dragPointerStart!,
+                hostSize,
+              );
+            },
+            onPanEnd: (_) => _endDragging(),
+            onPanCancel: _endDragging,
             child: Container(
               constraints: const BoxConstraints.expand(),
               decoration: BoxDecoration(
@@ -355,6 +387,18 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         ],
       ),
     );
+    if (bounds == null) return card;
+    return Stack(
+      fit: StackFit.expand,
+      children: [Positioned.fromRect(rect: bounds, child: card)],
+    );
+  }
+
+  void _endDragging() {
+    if (_dragCardStart == null) return;
+    _dragCardStart = null;
+    _dragPointerStart = null;
+    unawaited(DesktopWindowManager.instance.snapWidgetToEdge());
   }
 
   Widget _buildCompact(
@@ -640,21 +684,39 @@ class _DesktopGlassSurface extends StatelessWidget {
   const _DesktopGlassSurface({
     required this.shader,
     required this.textureId,
+    this.desktopSize,
+    this.desktopOffset = Offset.zero,
     required this.refraction,
     required this.chromatic,
   });
   final ui.FragmentShader shader;
   final int textureId;
+  final Size? desktopSize;
+  final Offset desktopOffset;
   final double refraction;
   final double chromatic;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      final texture = Texture(
+      Widget texture = Texture(
         textureId: textureId,
         filterQuality: FilterQuality.low,
       );
+      if (desktopSize != null) {
+        // Both the visible card and this screen-anchored sampling transform
+        // belong to the same Flutter scene. Native window geometry never moves.
+        texture = ClipRect(
+          child: OverflowBox(
+            alignment: Alignment.topLeft,
+            minWidth: desktopSize!.width,
+            maxWidth: desktopSize!.width,
+            minHeight: desktopSize!.height,
+            maxHeight: desktopSize!.height,
+            child: Transform.translate(offset: -desktopOffset, child: texture),
+          ),
+        );
+      }
       // 两项都关闭时真正直出桌面纹理，避免“关了效果”仍经过模糊/着色器。
       if (refraction == 0 && chromatic == 0) return texture;
       final dpr = MediaQuery.devicePixelRatioOf(context);
