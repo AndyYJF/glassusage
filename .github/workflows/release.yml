@@ -143,7 +143,7 @@ jobs:
           $downloadUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$setupName"
           $latestObj = [ordered]@{
             version   = $version
-            notes     = "GlassUsage $tag — Fix Windows mini-card background alignment during dragging while preserving refraction and dispersion."
+            notes     = "GlassUsage $tag — Read the current version from build metadata for both display and update checks; prevent repeated updates to the installed version."
             pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
             platforms = [ordered]@{
               "windows-x86_64" = [ordered]@{

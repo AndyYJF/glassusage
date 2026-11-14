@@ -16,7 +16,8 @@ import '../../domain/models/usage_models.dart';
 import '../providers/app_providers.dart';
 import '../widgets/glass_widgets.dart';
 
-const String kAppVersion = '0.7.11';
+// Flutter injects this binary's pubspec version (or --build-name override).
+const String kAppVersion = String.fromEnvironment('FLUTTER_BUILD_NAME');
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
