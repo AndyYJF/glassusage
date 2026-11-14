@@ -187,13 +187,10 @@ class DesktopWindowManager extends WindowListener {
   }
 
   Future<void> startDragging() async {
-    // Cancel once before the native move loop; Windows emits a Dart event for
-    // every WM_MOVING message, so avoid work in onWindowMove per mouse update.
+    // Cancel the pending snap before native mouse messages start moving it.
     _snapTimer?.cancel();
     _snapTimer = null;
     if (Platform.isWindows && _miniMode) {
-      // Mini mode cannot be fullscreen; call the plugin method directly to
-      // avoid its extra isFullScreen platform-channel round trip.
       await _windowManagerChannel.invokeMethod<void>('startDragging');
       return;
     }
@@ -291,11 +288,15 @@ class DesktopWindowManager extends WindowListener {
     }
 
     _miniMode = false;
-    if (Platform.isMacOS) {
+    if (Platform.isMacOS || Platform.isWindows) {
       // 先暂停并移除实时纹理，再恢复主窗口尺寸与材质，给在途绘制留出缓冲。
       // 此延迟不是无障碍崩溃修复；该修复位于 MiniCardView 的滑块实现。
       if (!_events.isClosed) _events.add('widget:suspend-glass');
-      await Future<void>.delayed(const Duration(milliseconds: 120));
+      await Future<void>.delayed(
+        Platform.isMacOS
+            ? const Duration(milliseconds: 120)
+            : Duration.zero,
+      );
     }
     await _setNativeMiniMode(false);
     await applyMaterial(_material, isDark: _isDark);

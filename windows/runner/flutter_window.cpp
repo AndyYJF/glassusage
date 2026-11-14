@@ -4,6 +4,7 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "resource.h"
+#include "../../packages/desktop_glass/windows/frame_sync.h"
 
 namespace {
 constexpr UINT kTrayIconId = 1;
@@ -186,6 +187,15 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == glassusage_frame_sync::Request() && flutter_controller_) {
+    // The plugin marks its prepared texture immediately after this returns.
+    // Post the acknowledgement so the engine's one-shot callback has retired
+    // before the plugin can register the next one.
+    flutter_controller_->engine()->SetNextFrameCallback([hwnd, wparam]() {
+      PostMessageW(hwnd, glassusage_frame_sync::Presented(), wparam, 0);
+    });
+    return 1;
+  }
   // window_manager's hidden title bar reserves resize borders. A mini popup
   // uses the entire rectangle, matching Flutter's rounded glass surface.
   if (mini_mode_ && message == WM_NCCALCSIZE) return 0;

@@ -223,7 +223,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
       final stats = await _glass.refreshStats();
       if (!mounted || stats == null) return;
       _setStatsPolling(
-        stats.hasValidFrame
+        stats.hasValidFrame || stats.paused || stats.captureState == 'failed'
             ? const Duration(seconds: 1)
             : const Duration(milliseconds: 100),
       );
@@ -336,10 +336,12 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
               constraints: const BoxConstraints.expand(),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(_miniCornerRadius),
-                border: Border.all(
-                  color: Colors.white.withValues(alpha: 0.20),
-                  width: 0.5,
-                ),
+                border: defaultTargetPlatform == TargetPlatform.windows
+                    ? null
+                    : Border.all(
+                        color: Colors.white.withValues(alpha: 0.20),
+                        width: 0.5,
+                      ),
               ),
               padding: EdgeInsets.symmetric(
                 horizontal: compact ? 12 : 20,
