@@ -3,25 +3,37 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
-
 #include <algorithm>
 #include <cstring>
+#if defined(_M_X64)
+#include <emmintrin.h>
+#endif
 
 using Microsoft::WRL::ComPtr;
-
 namespace {
 constexpr DWORD kExcludeFromCapture = 0x11;
+bool SyntheticBackdrop() {
+#if defined(_DEBUG)
+  wchar_t value[8];
+  return GetEnvironmentVariableW(L"GLASSUSAGE_LAG_PROBE", value, 8) > 0;
+#else
+  return false;
+#endif
+}
+BOOL CALLBACK CollectMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM data) {
+  reinterpret_cast<std::vector<HMONITOR>*>(data)->push_back(monitor);
+  return TRUE;
+}
+}  // namespace
 
-struct CaptureDevice {
+struct MiniDesktopCapture::CaptureDevice {
   HMONITOR monitor = nullptr;
   DXGI_OUTPUT_DESC output{};
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
   ComPtr<IDXGIOutputDuplication> duplication;
-  ComPtr<ID3D11Texture2D> desktop;
   ComPtr<ID3D11Texture2D> staging;
-  UINT crop_width = 0;
-  UINT crop_height = 0;
+  std::vector<uint8_t> rgba;
 
   HRESULT Initialize(HMONITOR requested) {
     *this = CaptureDevice{};
@@ -69,13 +81,82 @@ struct CaptureDevice {
         return POINT{x, y};
     }
   }
+
+  HRESULT Read(bool& changed) {
+    DXGI_OUTDUPL_FRAME_INFO info{};
+    ComPtr<IDXGIResource> resource;
+    HRESULT hr = duplication->AcquireNextFrame(0, &info, &resource);
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) return S_OK;
+    if (FAILED(hr)) return hr;
+    if (!info.LastPresentTime.QuadPart && !rgba.empty()) {
+      duplication->ReleaseFrame();
+      return S_OK;
+    }
+    ComPtr<ID3D11Texture2D> image;
+    hr = resource.As(&image);
+    D3D11_TEXTURE2D_DESC desc{};
+    if (SUCCEEDED(hr)) {
+      image->GetDesc(&desc);
+      if (!staging) {
+        auto readback = desc;
+        readback.Usage = D3D11_USAGE_STAGING;
+        readback.BindFlags = readback.MiscFlags = 0;
+        readback.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        hr = device->CreateTexture2D(&readback, nullptr, &staging);
+      }
+      if (SUCCEEDED(hr)) context->CopyResource(staging.Get(), image.Get());
+    }
+    duplication->ReleaseFrame();
+    if (FAILED(hr)) return hr;
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    hr = context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) return hr;
+    const int width = output.DesktopCoordinates.right - output.DesktopCoordinates.left;
+    const int height = output.DesktopCoordinates.bottom - output.DesktopCoordinates.top;
+    rgba.resize(static_cast<size_t>(width) * height * 4);
+    for (int y = 0; y < height; ++y) {
+      auto* dst = reinterpret_cast<uint32_t*>(rgba.data()) + static_cast<size_t>(y) * width;
+      if (output.Rotation == DXGI_MODE_ROTATION_IDENTITY ||
+          output.Rotation == DXGI_MODE_ROTATION_UNSPECIFIED) {
+        const auto* src = reinterpret_cast<const uint32_t*>(
+            static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+        int x = 0;
+#if defined(_M_X64)
+        const auto mask = _mm_set1_epi32(0x000000ff);
+        const auto green = _mm_set1_epi32(0x0000ff00);
+        const auto alpha = _mm_set1_epi32(static_cast<int>(0xff000000));
+        for (; x + 4 <= width; x += 4) {
+          const auto pixels = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + x));
+          const auto converted = _mm_or_si128(alpha, _mm_or_si128(
+              _mm_and_si128(pixels, green), _mm_or_si128(
+              _mm_slli_epi32(_mm_and_si128(pixels, mask), 16),
+              _mm_and_si128(_mm_srli_epi32(pixels, 16), mask))));
+          _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + x), converted);
+        }
+#endif
+        for (; x < width; ++x) {
+          const uint32_t p = src[x];
+          dst[x] = 0xff000000 | (p & 0xff00) | ((p & 0xff) << 16) | ((p >> 16) & 0xff);
+        }
+      } else {
+        for (int x = 0; x < width; ++x) {
+          const POINT p = SourcePoint(x, y, desc);
+          const auto* src = reinterpret_cast<const uint32_t*>(
+              static_cast<const uint8_t*>(mapped.pData) + p.y * mapped.RowPitch);
+          const uint32_t v = src[p.x];
+          dst[x] = 0xff000000 | (v & 0xff00) | ((v & 0xff) << 16) | ((v >> 16) & 0xff);
+        }
+      }
+    }
+    context->Unmap(staging.Get(), 0);
+    changed = true;
+    return S_OK;
+  }
 };
-}  // namespace
 
-MiniDesktopCapture::MiniDesktopCapture(
-    HWND window, flutter::TextureRegistrar* registrar, int fps)
+MiniDesktopCapture::MiniDesktopCapture(HWND window,
+    flutter::TextureRegistrar* registrar, int fps)
     : window_(window), registrar_(registrar), fps_(fps) {}
-
 MiniDesktopCapture::~MiniDesktopCapture() { Stop(); }
 
 bool MiniDesktopCapture::IsSupported() {
@@ -89,19 +170,16 @@ bool MiniDesktopCapture::IsSupported() {
 
 std::string MiniDesktopCapture::Start() {
   if (running_) return {};
-  if (!IsSupported()) {
-    return "Live backdrop requires Windows 10 2004 or later";
-  }
+  if (!IsSupported()) return "Live backdrop requires Windows 10 2004 or later";
   GetWindowDisplayAffinity(window_, &previous_affinity_);
-  if (!SetWindowDisplayAffinity(window_, kExcludeFromCapture)) {
-    return "Cannot exclude mini window from capture: " +
-           std::to_string(GetLastError());
+  if (!SyntheticBackdrop()) {
+    if (!SetWindowDisplayAffinity(window_, kExcludeFromCapture))
+      return "Cannot exclude mini host from capture: " + std::to_string(GetLastError());
+    affinity_changed_ = true;
   }
-  affinity_changed_ = true;
   const auto state = state_;
   texture_ = std::make_shared<flutter::TextureVariant>(
-      flutter::PixelBufferTexture([state](size_t, size_t)
-          -> const FlutterDesktopPixelBuffer* {
+      flutter::PixelBufferTexture([state](size_t, size_t) -> const FlutterDesktopPixelBuffer* {
         struct Lease {
           FlutterDesktopPixelBuffer buffer{};
           std::shared_ptr<Frame> frame;
@@ -116,18 +194,14 @@ std::string MiniDesktopCapture::Start() {
         lease->buffer.width = lease->frame->width;
         lease->buffer.height = lease->frame->height;
         lease->buffer.release_context = lease.get();
-        lease->buffer.release_callback = [](void* context) {
-          delete static_cast<Lease*>(context);
-        };
+        lease->buffer.release_callback = [](void* context) { delete static_cast<Lease*>(context); };
         state->presented.fetch_add(1);
         return &lease.release()->buffer;
       }));
   texture_id_ = registrar_->RegisterTexture(texture_.get());
   if (texture_id_ < 0) {
-    texture_.reset();
-    SetWindowDisplayAffinity(window_, previous_affinity_);
-    affinity_changed_ = false;
-    return "Cannot register live desktop texture";
+    Stop();
+    return "Cannot register desktop atlas texture";
   }
   started_ = std::chrono::steady_clock::now();
   running_ = true;
@@ -137,212 +211,220 @@ std::string MiniDesktopCapture::Start() {
 
 void MiniDesktopCapture::Stop() {
   running_ = false;
+  wake_.notify_all();
   if (thread_.joinable()) thread_.join();
+  {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->frame.reset();
+  }
   if (texture_id_ >= 0) {
-    // Keep callbacks and their frame store alive until raster-thread retirement.
     const auto texture = texture_;
     registrar_->UnregisterTexture(texture_id_, [texture]() {});
     texture_id_ = -1;
-    texture_.reset();
   }
-  if (affinity_changed_ && IsWindow(window_)) {
+  texture_.reset();
+  if (affinity_changed_ && IsWindow(window_))
     SetWindowDisplayAffinity(window_, previous_affinity_);
-  }
   affinity_changed_ = false;
+}
+
+void MiniDesktopCapture::SetPaused(bool paused) {
+  {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (paused_.exchange(paused) == paused) return;
+    state_->frame.reset();
+    state_->error.clear();
+    state_->waiting_since = std::chrono::steady_clock::now();
+    ++state_->recovery_epoch;
+  }
+  wake_.notify_all();
 }
 
 void MiniDesktopCapture::SetError(HRESULT error) {
   std::lock_guard<std::mutex> lock(state_->mutex);
-  state_->error = "Desktop capture HRESULT " +
-                  std::to_string(static_cast<uint32_t>(error));
+  if (state_->frame) state_->waiting_since = std::chrono::steady_clock::now();
+  state_->frame.reset();
+  state_->error = "Desktop capture HRESULT " + std::to_string(static_cast<uint32_t>(error));
+  ++state_->recovery_epoch;
 }
 
 flutter::EncodableMap MiniDesktopCapture::Stats() {
   using V = flutter::EncodableValue;
-  const double elapsed = std::chrono::duration<double>(
-      std::chrono::steady_clock::now() - started_).count();
-  flutter::EncodableMap result;
-  result[V("textureId")] = V(texture_id_);
-  result[V("frames")] = V(static_cast<int64_t>(state_->frames.load()));
-  result[V("presented")] = V(static_cast<int64_t>(state_->presented.load()));
-  result[V("changes")] = V(static_cast<int64_t>(state_->changes.load()));
-  result[V("elapsed")] = V(elapsed);
-  result[V("luminance")] = V(state_->luminance.load());
-  result[V("paused")] = V(paused_.load() || !IsWindowVisible(window_) || IsIconic(window_));
+  const auto now = std::chrono::steady_clock::now();
+  const bool paused = paused_ || !IsWindowVisible(window_) || IsIconic(window_);
   DWORD affinity = WDA_NONE;
   GetWindowDisplayAffinity(window_, &affinity);
-  result[V("selfExcluded")] = V(affinity == kExcludeFromCapture);
   std::lock_guard<std::mutex> lock(state_->mutex);
-  result[V("error")] = V(state_->error);
+  const bool valid = !paused && state_->frame != nullptr;
+  // Stats and runner bounds updates run on the platform thread. Sample only
+  // the actual card, not the full atlas, for foreground contrast selection.
+  const auto* card = static_cast<const RECT*>(GetPropW(window_, L"GlassUsageMiniCardBounds"));
+  if (valid && card) {
+    const auto& frame = *state_->frame;
+    double luminance = 0;
+    size_t samples = 0;
+    const int right = std::min(static_cast<int>(frame.width), static_cast<int>(card->right));
+    const int bottom = std::min(static_cast<int>(frame.height), static_cast<int>(card->bottom));
+    for (int y = std::max(0L, card->top); y < bottom; y += 16) {
+      for (int x = std::max(0L, card->left); x < right; x += 16) {
+        const auto* p = frame.rgba.data() + (static_cast<size_t>(y) * frame.width + x) * 4;
+        luminance += (0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]) / 255.0;
+        ++samples;
+      }
+    }
+    state_->luminance.store(samples ? luminance / samples : 0);
+  }
+  const bool failed = !paused && !valid && now - state_->waiting_since > std::chrono::seconds(5);
+  flutter::EncodableMap result{
+    {V("textureId"), V(texture_id_)},
+    {V("frames"), V(static_cast<int64_t>(state_->frames.load()))},
+    {V("presented"), V(static_cast<int64_t>(state_->presented.load()))},
+    {V("changes"), V(static_cast<int64_t>(state_->frames.load()))},
+    {V("elapsed"), V(std::chrono::duration<double>(now - started_).count())},
+    {V("luminance"), V(state_->luminance.load())},
+    {V("paused"), V(paused)},
+    {V("hasValidFrame"), V(valid)},
+    {V("captureState"), V(std::string(paused ? "paused" : valid ? "running" : failed ? "failed" : "waitingForFrame"))},
+    {V("selfExcluded"), V(affinity == kExcludeFromCapture)},
+    {V("recoveryEpoch"), V(static_cast<int64_t>(state_->recovery_epoch))},
+    {V("error"), V(state_->error)},
+  };
   if (state_->frame) {
     result[V("width")] = V(static_cast<int>(state_->frame->width));
     result[V("height")] = V(static_cast<int>(state_->frame->height));
+    result[V("lastFrameAgeMs")] = V(std::chrono::duration<double, std::milli>(now - state_->last_frame).count());
   }
   return result;
 }
 
 void MiniDesktopCapture::Run() {
-  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-  CaptureDevice capture;
-  RECT previous_rect{};
-  uint64_t previous_hash = 0;
-  auto next_frame = std::chrono::steady_clock::now();
-  const auto kFramePeriod = std::chrono::nanoseconds(1000000000 / fps_);
-  while (running_) {
-    next_frame += kFramePeriod;
-    std::this_thread::sleep_until(next_frame);
-    const auto now = std::chrono::steady_clock::now();
-    if (next_frame < now - kFramePeriod) next_frame = now;
-    if (!running_) break;
-    if (paused_ || !IsWindowVisible(window_) || IsIconic(window_)) continue;
-    const HMONITOR monitor = MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST);
-    if (capture.monitor != monitor) {
-      const HRESULT hr = capture.Initialize(monitor);
+  std::vector<std::unique_ptr<CaptureDevice>> outputs;
+  std::vector<HMONITOR> monitors;
+  RECT previous_bounds{};
+  uint64_t epoch = 0;
+  bool inactive = false;
+  const auto period = std::chrono::nanoseconds(1000000000 / fps_);
+  auto deadline = std::chrono::steady_clock::now();
+  auto topology_check = deadline;
+  try {
+    while (running_) {
+      deadline += period;
+      {
+        std::unique_lock<std::mutex> lock(state_->mutex);
+        wake_.wait_until(lock, deadline, [this] { return !running_ || paused_; });
+        if (paused_ && running_) {
+          outputs.clear();
+          wake_.wait(lock, [this] { return !running_ || !paused_; });
+        }
+      }
+      if (!running_) break;
+      const auto now = std::chrono::steady_clock::now();
+      if (now > deadline + period) deadline = now;
+      if (!IsWindowVisible(window_) || IsIconic(window_)) {
+        outputs.clear();
+        if (!inactive) {
+          std::lock_guard<std::mutex> lock(state_->mutex);
+          state_->frame.reset();
+          state_->waiting_since = now;
+          ++state_->recovery_epoch;
+        }
+        inactive = true;
+        continue;
+      }
+      RECT bounds{};
+      POINT origin{};
+      if (!GetClientRect(window_, &bounds) || !ClientToScreen(window_, &origin)) continue;
+      OffsetRect(&bounds, origin.x, origin.y);
+      const int width = bounds.right - bounds.left;
+      const int height = bounds.bottom - bounds.top;
+      if (width <= 0 || height <= 0 || static_cast<int64_t>(width) * height > 67108864) {
+        SetError(E_INVALIDARG);
+        continue;
+      }
+      uint64_t current_epoch;
+      {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        current_epoch = state_->recovery_epoch;
+      }
+      if (now >= topology_check) {
+        std::vector<HMONITOR> current;
+        EnumDisplayMonitors(nullptr, nullptr, CollectMonitor, reinterpret_cast<LPARAM>(&current));
+        if (current != monitors) {
+          monitors = std::move(current);
+          outputs.clear();
+        }
+        topology_check = now + std::chrono::seconds(1);
+      }
+      bool changed = inactive || !EqualRect(&previous_bounds, &bounds);
+      inactive = false;
+      HRESULT hr = S_OK;
+      if (epoch != current_epoch) outputs.clear();
+      epoch = current_epoch;
+      if (outputs.empty()) {
+        for (const auto monitor : monitors) {
+          auto output = std::make_unique<CaptureDevice>();
+          hr = output->Initialize(monitor);
+          if (FAILED(hr)) break;
+          outputs.push_back(std::move(output));
+        }
+        changed = true;
+      }
+      bool ready = !outputs.empty();
+      if (SUCCEEDED(hr)) {
+        for (auto& output : outputs) {
+          hr = output->Read(changed);
+          if (FAILED(hr)) break;
+          ready = ready && !output->rgba.empty();
+        }
+      }
       if (FAILED(hr)) {
         SetError(hr);
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        outputs.clear();
+        std::unique_lock<std::mutex> lock(state_->mutex);
+        wake_.wait_for(lock, std::chrono::milliseconds(250), [this] { return !running_ || paused_; });
         continue;
       }
-    }
-    DXGI_OUTDUPL_FRAME_INFO info{};
-    ComPtr<IDXGIResource> resource;
-    HRESULT hr = capture.duplication->AcquireNextFrame(1, &info, &resource);
-    const bool acquired = SUCCEEDED(hr);
-    if (acquired) {
-      ComPtr<ID3D11Texture2D> image;
-      hr = resource.As(&image);
-      if (SUCCEEDED(hr)) {
-        D3D11_TEXTURE2D_DESC desc{};
-        image->GetDesc(&desc);
-        if (!capture.desktop) {
-          desc.Usage = D3D11_USAGE_DEFAULT;
-          desc.BindFlags = 0;
-          desc.CPUAccessFlags = 0;
-          desc.MiscFlags = 0;
-          hr = capture.device->CreateTexture2D(&desc, nullptr, &capture.desktop);
+      if (!changed || !ready) continue;
+      auto frame = std::make_shared<Frame>();
+      frame->width = width;
+      frame->height = height;
+      frame->bounds = bounds;
+      frame->rgba.resize(static_cast<size_t>(width) * height * 4);
+      for (const auto& output : outputs) {
+        const RECT area = output->output.DesktopCoordinates;
+        RECT visible{};
+        if (!IntersectRect(&visible, &bounds, &area)) continue;
+        const size_t output_width = area.right - area.left;
+        for (LONG y = visible.top; y < visible.bottom; ++y) {
+          const auto* src = output->rgba.data() +
+              ((y - area.top) * output_width + visible.left - area.left) * 4;
+          auto* dst = frame->rgba.data() +
+              (static_cast<size_t>(y - bounds.top) * width + visible.left - bounds.left) * 4;
+          std::memcpy(dst, src, static_cast<size_t>(visible.right - visible.left) * 4);
         }
-        if (SUCCEEDED(hr)) capture.context->CopyResource(capture.desktop.Get(), image.Get());
       }
-      capture.duplication->ReleaseFrame();
-    } else if (hr != DXGI_ERROR_WAIT_TIMEOUT) {
-      SetError(hr);
-      capture = CaptureDevice{};
-      continue;
-    }
-    if (FAILED(hr) && hr != DXGI_ERROR_WAIT_TIMEOUT) {
-      SetError(hr);
-      continue;
-    }
-    if (!capture.desktop) continue;
-    RECT rect{};
-    GetClientRect(window_, &rect);
-    POINT origin{0, 0};
-    ClientToScreen(window_, &origin);
-    OffsetRect(&rect, origin.x, origin.y);
-    if (!acquired && EqualRect(&rect, &previous_rect)) continue;
-    const int width = rect.right - rect.left;
-    const int height = rect.bottom - rect.top;
-    if (width <= 0 || height <= 0 || width > 2048 || height > 2048) continue;
-    RECT visible{};
-    if (!IntersectRect(&visible, &rect, &capture.output.DesktopCoordinates)) continue;
-    D3D11_TEXTURE2D_DESC desktop_desc{};
-    capture.desktop->GetDesc(&desktop_desc);
-    const int left = visible.left - capture.output.DesktopCoordinates.left;
-    const int top = visible.top - capture.output.DesktopCoordinates.top;
-    const int right = visible.right - capture.output.DesktopCoordinates.left - 1;
-    const int bottom = visible.bottom - capture.output.DesktopCoordinates.top - 1;
-    const POINT first = capture.SourcePoint(left, top, desktop_desc);
-    const POINT last = capture.SourcePoint(right, bottom, desktop_desc);
-    D3D11_BOX box{};
-    box.left = static_cast<UINT>(std::min(first.x, last.x));
-    box.top = static_cast<UINT>(std::min(first.y, last.y));
-    box.right = static_cast<UINT>(std::max(first.x, last.x) + 1);
-    box.bottom = static_cast<UINT>(std::max(first.y, last.y) + 1);
-    box.back = 1;
-    if (box.right > desktop_desc.Width || box.bottom > desktop_desc.Height) continue;
-    const UINT crop_width = box.right - box.left;
-    const UINT crop_height = box.bottom - box.top;
-    if (capture.crop_width != crop_width || capture.crop_height != crop_height) {
-      capture.staging.Reset();
-      D3D11_TEXTURE2D_DESC desc{};
-      desc.Width = crop_width;
-      desc.Height = crop_height;
-      desc.MipLevels = desc.ArraySize = 1;
-      desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-      desc.SampleDesc.Count = 1;
-      desc.Usage = D3D11_USAGE_STAGING;
-      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      hr = capture.device->CreateTexture2D(&desc, nullptr, &capture.staging);
-      if (FAILED(hr)) { SetError(hr); continue; }
-      capture.crop_width = crop_width;
-      capture.crop_height = crop_height;
-    }
-    capture.context->CopySubresourceRegion(capture.staging.Get(), 0, 0, 0, 0,
-        capture.desktop.Get(), 0, &box);
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    hr = capture.context->Map(capture.staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
-    if (FAILED(hr)) { SetError(hr); continue; }
-    auto frame = std::make_shared<Frame>();
-    frame->width = static_cast<size_t>(width);
-    frame->height = static_cast<size_t>(height);
-    frame->rgba.resize(frame->width * frame->height * 4);
-    uint64_t hash = 1469598103934665603ULL;
-    double luminance = 0;
-    size_t samples = 0;
-    for (int y = visible.top; y < visible.bottom; ++y) {
-      if (capture.output.Rotation == DXGI_MODE_ROTATION_IDENTITY ||
-          capture.output.Rotation == DXGI_MODE_ROTATION_UNSPECIFIED) {
-        const auto* source = reinterpret_cast<const uint32_t*>(
-            static_cast<const uint8_t*>(mapped.pData) +
-            (y - visible.top) * mapped.RowPitch);
-        auto* target = reinterpret_cast<uint32_t*>(frame->rgba.data() +
-            ((y - rect.top) * frame->width + (visible.left - rect.left)) * 4);
-        for (int x = 0; x < visible.right - visible.left; ++x) {
-          const uint32_t color = source[x];
-          target[x] = 0xff000000 | (color & 0x0000ff00) |
-                      ((color & 0x00ff0000) >> 16) | ((color & 0xff) << 16);
-        }
-        if ((y & 31) == 0) {
-          for (int x = 0; x < visible.right - visible.left; x += 32) {
-            const uint32_t color = source[x];
-            hash = (hash ^ color) * 1099511628211ULL;
-            luminance += (0.2126 * ((color >> 16) & 255) +
-                          0.7152 * ((color >> 8) & 255) + 0.0722 * (color & 255)) / 255;
-            ++samples;
+      if (SyntheticBackdrop()) {
+        auto* pixels = reinterpret_cast<uint32_t*>(frame->rgba.data());
+        for (int y = 0; y < height; ++y) {
+          for (int x = 0; x < width; ++x) {
+            const int absolute = x + bounds.left;
+            const int phase = ((absolute % 512) + 512) % 512;
+            pixels[static_cast<size_t>(y) * width + x] = phase < 64 ? 0xff00ff00 : 0xffff00ff;
           }
         }
-        continue;
       }
-      for (int x = visible.left; x < visible.right; ++x) {
-        const POINT source = capture.SourcePoint(
-            x - capture.output.DesktopCoordinates.left,
-            y - capture.output.DesktopCoordinates.top, desktop_desc);
-        const auto* pixel = static_cast<const uint8_t*>(mapped.pData) +
-            (source.y - box.top) * mapped.RowPitch + (source.x - box.left) * 4;
-        auto* target = frame->rgba.data() +
-            ((y - rect.top) * frame->width + (x - rect.left)) * 4;
-        target[0] = pixel[2]; target[1] = pixel[1];
-        target[2] = pixel[0]; target[3] = 255;
-        if ((x & 31) == 0 && (y & 31) == 0) {
-          hash = (hash ^ (pixel[0] | (pixel[1] << 8) | (pixel[2] << 16))) * 1099511628211ULL;
-          luminance += (0.2126 * pixel[2] + 0.7152 * pixel[1] + 0.0722 * pixel[0]) / 255;
-          ++samples;
-        }
+      {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (!running_ || paused_ || epoch != state_->recovery_epoch) continue;
+        state_->frame = std::move(frame);
+        state_->error.clear();
+        state_->last_frame = now;
+        state_->frames.fetch_add(1);
       }
+      previous_bounds = bounds;
+      registrar_->MarkTextureFrameAvailable(texture_id_);
     }
-    capture.context->Unmap(capture.staging.Get(), 0);
-    if (samples > 0) state_->luminance = luminance / samples;
-    if (hash != previous_hash) state_->changes.fetch_add(1);
-    previous_hash = hash;
-    previous_rect = rect;
-    {
-      std::lock_guard<std::mutex> lock(state_->mutex);
-      state_->frame = std::move(frame);
-      state_->error.clear();
-    }
-    state_->frames.fetch_add(1);
-    registrar_->MarkTextureFrameAvailable(texture_id_);
+  } catch (const std::exception&) {
+    SetError(E_OUTOFMEMORY);
   }
-  capture = CaptureDevice{};
-  CoUninitialize();
 }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_acrylic/flutter_acrylic.dart' as acrylic;
@@ -26,12 +27,14 @@ class DesktopWindowManager extends WindowListener {
   static const MethodChannel _macWindowChannel = MethodChannel(
     'glassusage/desktop_window',
   );
-  static const MethodChannel _windowManagerChannel = MethodChannel(
-    'window_manager',
-  );
   final StreamController<String> _events = StreamController.broadcast();
 
   Stream<String> get events => _events.stream;
+
+  final ValueNotifier<Rect?> miniCardBounds = ValueNotifier(null);
+  Offset _miniHostOrigin = Offset.zero;
+  bool _sendingMiniBounds = false;
+  bool _miniBoundsPending = false;
 
   Rect? _mainBounds;
   double _mainBoundsScale = 1;
@@ -93,6 +96,7 @@ class DesktopWindowManager extends WindowListener {
 
   @override
   void onWindowMoved() {
+    if (Platform.isWindows && _miniMode) return;
     if (!_events.isClosed) _events.add('window:moved');
     _snapTimer?.cancel();
     if (_events.isClosed) return;
@@ -129,20 +133,18 @@ class DesktopWindowManager extends WindowListener {
     };
     try {
       await acrylic.Window.setEffect(
-        effect:
-            _miniMode
-                ? (_miniFrosted
-                    ? (Platform.isMacOS
+        effect: _miniMode
+            ? (_miniFrosted
+                  ? (Platform.isMacOS
                         ? acrylic.WindowEffect.sidebar
                         : acrylic.WindowEffect.acrylic)
-                    : acrylic.WindowEffect.transparent)
-                : effect,
-        color:
-            _miniMode && !_miniFrosted
-                ? Colors.transparent
-                : isDark
-                ? const Color(0xCC171923)
-                : const Color(0xCCF4F5F8),
+                  : acrylic.WindowEffect.transparent)
+            : effect,
+        color: _miniMode && !_miniFrosted
+            ? Colors.transparent
+            : isDark
+            ? const Color(0xCC171923)
+            : const Color(0xCCF4F5F8),
         dark: isDark,
       );
     } catch (error, stack) {
@@ -158,6 +160,8 @@ class DesktopWindowManager extends WindowListener {
   }
 
   Future<void> setMiniFrosted(bool enabled) async {
+    // A full-desktop host must remain transparent outside the card.
+    if (Platform.isWindows && _miniMode) enabled = false;
     if (_miniFrosted == enabled) return;
     _miniFrosted = enabled;
     if (!_initialized || !_miniMode) return;
@@ -177,7 +181,24 @@ class DesktopWindowManager extends WindowListener {
   Future<void> _setNativeMiniMode(bool enabled) async {
     try {
       if (Platform.isWindows) {
-        await _channel.invokeMethod<void>('setMiniMode', enabled);
+        final data = await _channel.invokeMapMethod<String, dynamic>(
+          'setMiniMode',
+          enabled,
+        );
+        if (enabled && data != null) {
+          _miniHostOrigin = Offset(
+            data['hostLeft'] as double,
+            data['hostTop'] as double,
+          );
+          miniCardBounds.value = Rect.fromLTWH(
+            data['left'] as double,
+            data['top'] as double,
+            data['width'] as double,
+            data['height'] as double,
+          );
+        } else if (!enabled) {
+          miniCardBounds.value = null;
+        }
       } else if (Platform.isMacOS) {
         await _macWindowChannel.invokeMethod<void>('setMiniMode', enabled);
       }
@@ -186,16 +207,55 @@ class DesktopWindowManager extends WindowListener {
     }
   }
 
+  void moveMiniCard(Offset position, Size hostSize) {
+    final card = miniCardBounds.value;
+    if (card == null) return;
+    final scale = _windowScale;
+    final next = Offset(
+      (position.dx.clamp(0.0, math.max(0.0, hostSize.width - card.width)) *
+                  scale)
+              .round() /
+          scale,
+      (position.dy.clamp(0.0, math.max(0.0, hostSize.height - card.height)) *
+                  scale)
+              .round() /
+          scale,
+    );
+    miniCardBounds.value = next & card.size;
+    unawaited(_sendMiniBounds());
+  }
+
+  Future<void> _sendMiniBounds() async {
+    _miniBoundsPending = true;
+    if (_sendingMiniBounds) return;
+    _sendingMiniBounds = true;
+    try {
+      while (_miniBoundsPending && _miniMode) {
+        _miniBoundsPending = false;
+        final card = miniCardBounds.value;
+        if (card == null) break;
+        final scale = _windowScale;
+        await _channel.invokeMethod<void>(
+          'setMiniCardBounds',
+          Float64List.fromList([
+            card.left * scale,
+            card.top * scale,
+            card.right * scale,
+            card.bottom * scale,
+          ]),
+        );
+      }
+    } finally {
+      _sendingMiniBounds = false;
+    }
+  }
+
   Future<void> startDragging() async {
-    // Cancel once before the native move loop; Windows emits a Dart event for
-    // every WM_MOVING message, so avoid work in onWindowMove per mouse update.
+    // Cancel the pending snap before native mouse messages start moving it.
     _snapTimer?.cancel();
     _snapTimer = null;
     if (Platform.isWindows && _miniMode) {
-      // Mini mode cannot be fullscreen; call the plugin method directly to
-      // avoid its extra isFullScreen platform-channel round trip.
-      await _windowManagerChannel.invokeMethod<void>('startDragging');
-      return;
+      return; // The card moves within the fixed Flutter surface.
     }
     if (Platform.isMacOS && _miniMode) {
       // 不走 window_manager 的 performDrag 嵌套循环，保证拖动中仍可提交纹理。
@@ -209,8 +269,9 @@ class DesktopWindowManager extends WindowListener {
 
   /// Window top-left in global top-left logical points (the same space the
   /// desktop_glass texture origin is reported in).
-  Future<Offset> windowTopLeft() async =>
-      (await windowManager.getBounds()).topLeft;
+  Future<Offset> windowTopLeft() async => miniCardBounds.value != null
+      ? _miniHostOrigin + miniCardBounds.value!.topLeft
+      : (await windowManager.getBounds()).topLeft;
 
   Future<void> toggleMaximize() async {
     if (await windowManager.isMaximized()) {
@@ -263,7 +324,10 @@ class DesktopWindowManager extends WindowListener {
   }) async {
     if (!_initialized) return;
     final windowScale = _windowScale;
-    final currentBounds = await windowManager.getBounds();
+    final hostBounds = await windowManager.getBounds();
+    final currentBounds = Platform.isWindows && miniCardBounds.value != null
+        ? miniCardBounds.value!.shift(_miniHostOrigin)
+        : hostBounds;
     final displays = await screenRetriever.getAllDisplays();
     if (displays.isEmpty) throw StateError('No displays available');
     final workArea = _workAreaFor(currentBounds, displays, windowScale);
@@ -278,6 +342,14 @@ class DesktopWindowManager extends WindowListener {
       final position = currentIsWidget
           ? currentBounds.topLeft
           : Offset(workArea.right - size.width - 16, workArea.top + 16);
+      if (Platform.isWindows && currentIsWidget) {
+        miniCardBounds.value =
+            _clampPosition(position, size, workArea) - _miniHostOrigin & size;
+        await _sendMiniBounds();
+        await windowManager.setAlwaysOnTop(alwaysOnTop);
+        if (!_events.isClosed) _events.add('widget:ready');
+        return;
+      }
       await windowManager.setMinimumSize(Size(size.width, size.height));
       await windowManager.setBounds(
         _clampPosition(position, size, workArea) & size,
@@ -291,28 +363,25 @@ class DesktopWindowManager extends WindowListener {
     }
 
     _miniMode = false;
-    if (Platform.isMacOS) {
+    if (Platform.isMacOS || Platform.isWindows) {
       // 先暂停并移除实时纹理，再恢复主窗口尺寸与材质，给在途绘制留出缓冲。
       // 此延迟不是无障碍崩溃修复；该修复位于 MiniCardView 的滑块实现。
       if (!_events.isClosed) _events.add('widget:suspend-glass');
-      await Future<void>.delayed(const Duration(milliseconds: 120));
+      await Future<void>.delayed(
+        Platform.isMacOS ? const Duration(milliseconds: 120) : Duration.zero,
+      );
     }
     await _setNativeMiniMode(false);
     await applyMaterial(_material, isDark: _isDark);
 
-    final desiredBounds =
-        _mainBounds != null
-            ? Rect.fromLTWH(
-              _mainBounds!.left * _mainBoundsScale / windowScale,
-              _mainBounds!.top * _mainBoundsScale / windowScale,
-              _mainBounds!.width,
-              _mainBounds!.height,
-            )
-            : Rect.fromCenter(
-              center: workArea.center,
-              width: 1220,
-              height: 800,
-            );
+    final desiredBounds = _mainBounds != null
+        ? Rect.fromLTWH(
+            _mainBounds!.left * _mainBoundsScale / windowScale,
+            _mainBounds!.top * _mainBoundsScale / windowScale,
+            _mainBounds!.width,
+            _mainBounds!.height,
+          )
+        : Rect.fromCenter(center: workArea.center, width: 1220, height: 800);
     final minimum = Size(
       math.min(900, workArea.width),
       math.min(600, workArea.height),
@@ -331,7 +400,9 @@ class DesktopWindowManager extends WindowListener {
   Future<void> _snapWidgetToEdge() async {
     if (!_initialized || !_miniMode) return;
     final windowScale = _windowScale;
-    final bounds = await windowManager.getBounds();
+    final bounds = Platform.isWindows && miniCardBounds.value != null
+        ? miniCardBounds.value!.shift(_miniHostOrigin)
+        : await windowManager.getBounds();
     final displays = await screenRetriever.getAllDisplays();
     if (displays.isEmpty) return;
     final area = _workAreaFor(bounds, displays, windowScale);
@@ -350,7 +421,12 @@ class DesktopWindowManager extends WindowListener {
       y = area.bottom - bounds.height - margin;
     }
     if (x != bounds.left || y != bounds.top) {
-      await windowManager.setPosition(Offset(x, y));
+      if (Platform.isWindows && miniCardBounds.value != null) {
+        miniCardBounds.value = (Offset(x, y) - _miniHostOrigin) & bounds.size;
+        await _sendMiniBounds();
+      } else {
+        await windowManager.setPosition(Offset(x, y));
+      }
     }
   }
 
