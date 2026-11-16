@@ -124,6 +124,7 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
   private var renderedEpoch: Int64 = -1
   private var renderedRect = CGRect.null
   private var geometryTimer: Timer?
+  private var lastGeometryCheckAt: TimeInterval = 0
   private var notificationPending = false
   private var sampledAt: TimeInterval = 0
   private var frames: Int64 = 0
@@ -241,7 +242,11 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
       observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
         guard let self = self else { return }
         let rect = self.windowRectInDisplay() ?? .zero
-        self.lock.lock(); self.sampleRect = rect; self.lock.unlock()
+        let now = ProcessInfo.processInfo.systemUptime
+        self.lock.lock()
+        self.sampleRect = rect
+        self.lastGeometryCheckAt = now
+        self.lock.unlock()
         self.scheduleFrame()
       })
     }
@@ -260,11 +265,19 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
       })
     // Common-mode geometry polling also runs inside AppKit's native drag loop.
     // It never reconfigures the capture stream.
+    let minPollInterval = 0.8 / Double(fps)
     geometryTimer = Timer(timeInterval: 1.0 / Double(fps), repeats: true) { [weak self] _ in
-      guard let self = self, let rect = self.windowRectInDisplay() else { return }
+      guard let self = self else { return }
+      let now = ProcessInfo.processInfo.systemUptime
+      self.lock.lock()
+      let recentlyChecked = (now - self.lastGeometryCheckAt) < minPollInterval
+      self.lock.unlock()
+      if recentlyChecked { return }
+      guard let rect = self.windowRectInDisplay() else { return }
       self.lock.lock()
       let changed = self.sampleRect != rect
       self.sampleRect = rect
+      self.lastGeometryCheckAt = now
       self.lock.unlock()
       if changed { self.scheduleFrame() }
     }
@@ -421,9 +434,9 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
           self.displayOrigin = geometry.display.frame.origin
           self.displayPoints = geometry.display.frame.size
           let rect = self.windowRectInDisplay() ?? .zero
-          self.lock.lock(); self.sampleRect = rect; self.lock.unlock()
+          self.lock.withLock { self.sampleRect = rect }
         } catch {
-          self.lock.lock(); self.failure = error.localizedDescription; self.lock.unlock()
+          self.lock.withLock { self.failure = error.localizedDescription }
         }
         self.updating = false
         // Anything that arrived mid-update was dropped by the `updating` gate;
@@ -481,28 +494,28 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
               configuration: geometry.config, delegate: self)
           try replacement.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.outputQueue)
           self.stream = replacement
-          self.lock.lock()
-          self.activeStreamID = ObjectIdentifier(replacement)
-          self.frameDeadline = ProcessInfo.processInfo.systemUptime + 5
-          self.lock.unlock()
+          self.lock.withLock {
+            self.activeStreamID = ObjectIdentifier(replacement)
+            self.frameDeadline = ProcessInfo.processInfo.systemUptime + 5
+          }
           self.displayId = geometry.display.displayID
           self.displayOrigin = geometry.display.frame.origin
           self.displayPoints = geometry.display.frame.size
           let rect = self.windowRectInDisplay() ?? .zero
-          self.lock.lock(); self.sampleRect = rect; self.lock.unlock()
+          self.lock.withLock { self.sampleRect = rect }
           self.needsRebuild = false
           self.reconcile()
         }
       } catch {
         self.rebuildAttempts += 1
-        self.lock.lock()
-        self.failure = error.localizedDescription
-        self.hasValidFrame = false
-        self.captureState = self.rebuildAttempts > 2 ? "failed" : "retrying"
-        self.lock.unlock()
+        self.lock.withLock {
+          self.failure = error.localizedDescription
+          self.hasValidFrame = false
+          self.captureState = self.rebuildAttempts > 2 ? "failed" : "retrying"
+        }
         self.needsRebuild = rebuild && self.rebuildAttempts <= 2
         self.retryAt = ProcessInfo.processInfo.systemUptime + 1
-        self.lock.lock(); self.frameDeadline = 0; self.lock.unlock()
+        self.lock.withLock { self.frameDeadline = 0 }
       }
       self.updating = false
       if self.needsRebuild { self.updateGeometry() }
@@ -709,7 +722,7 @@ private final class GlassCaptureSession: NSObject, FlutterTexture, SCStreamOutpu
       }
       guard let pool = cropPool else { return nil }
       var buffer: CVPixelBuffer?
-      let limits = [kCVPixelBufferPoolAllocationThresholdKey: 3] as CFDictionary
+      let limits = [kCVPixelBufferPoolAllocationThresholdKey: 4] as CFDictionary
       guard CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(nil, pool, limits, &buffer) == kCVReturnSuccess,
             let buffer = buffer else { return nil }
       let source = CIImage(cvPixelBuffer: image)

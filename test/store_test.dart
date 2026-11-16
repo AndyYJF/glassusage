@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:glassusage/data/database/app_database.dart';
 import 'package:glassusage/data/pricing/pricing_service.dart';
+import 'package:glassusage/domain/models/settings_model.dart';
 import 'package:glassusage/domain/models/usage_models.dart';
 
 void main() {
@@ -129,10 +130,46 @@ void main() {
         );
         final updated = store.reprice(pricing);
         expect(updated, 1);
+        expect(store.reprice(pricing), 0);
 
         final ovAfter = store.overview(0, now + 60000);
         expect(ovAfter.today.unpricedEvents, 0);
         expect(ovAfter.today.costUsd, closeTo(2.0, 1e-6));
+
+        final filters = store.filterOptions();
+        expect(filters.source, contains(SourceIds.claude));
+        expect(filters.modelNorm, contains('custom-model'));
+        expect(filters.instance, contains(kLocalInstance));
+
+        store.recordStatus(
+          SourceIds.claude,
+          kLocalInstance,
+          10,
+          0,
+          const ['/tmp/claude'],
+          null,
+        );
+        store.recordStatus(
+          SourceIds.claude,
+          kLocalInstance,
+          1,
+          0,
+          const ['/tmp/claude'],
+          null,
+          preserveHigherFileCount: true,
+        );
+        final health = store
+            .sourceHealth(
+              settings: AppSettings(),
+              detectedPathsBySource: {
+                SourceIds.claude: const ['/tmp/claude'],
+              },
+              realtimeSources: {SourceIds.claude},
+            )
+            .firstWhere((h) => h.source == SourceIds.claude);
+        expect(health.fileCount, 10);
+        expect(health.eventCount, 1);
+        expect(health.lastEventMs, now);
       } finally {
         store.dispose();
       }

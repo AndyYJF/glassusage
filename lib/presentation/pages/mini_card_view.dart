@@ -457,7 +457,7 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
               },
             ),
             _action(
-              ref.watch(appSettingsProvider).widgetAlwaysOnTop
+              ref.watch(appSettingsProvider.select((s) => s.widgetAlwaysOnTop))
                   ? Icons.push_pin_rounded
                   : Icons.push_pin_outlined,
               i18n.isZh ? '置顶' : 'Always on top',

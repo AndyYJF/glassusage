@@ -104,6 +104,8 @@ class _UsageWorkerEngine {
   /// File watchers & remote sync tracking.
   final List<StreamSubscription<WatchEvent>> _watchSubs = [];
   final Map<String, Timer> _watchDebounce = {};
+  final Map<String, Set<String>> _pendingWatchFiles = {};
+  final Set<String> _pendingScanSources = {};
   final Set<String> _runningRemoteSyncs = {};
   final Map<String, int> _lastRemoteSyncMs = {};
   bool _scanBusy = false;
@@ -137,10 +139,18 @@ class _UsageWorkerEngine {
       _tickRemoteScheduler();
       unawaited(_syncCursorNow());
       try {
-        store.reprice(pricing);
-        await pricing.refresh();
-        store.reprice(pricing);
-      } catch (_) {}
+        if (!pricing.hasFreshCache) {
+          await pricing.refresh();
+        }
+        if (store.reprice(pricing) > 0) {
+          _refreshTodayTotals();
+          _emitUsageUpdated('pricing', kLocalInstance, 0);
+        }
+      } catch (_) {
+        try {
+          store.reprice(pricing);
+        } catch (_) {}
+      }
     });
 
     // 1 Hz live-tick timer (uses cached today totals; zero SQLite queries unless midnight rolled over)
@@ -170,6 +180,7 @@ class _UsageWorkerEngine {
       sub.cancel();
     }
     _watchSubs.clear();
+    _pendingWatchFiles.clear();
 
     final settings = settingsStore.get();
     for (final collector in allCollectors()) {
@@ -180,11 +191,18 @@ class _UsageWorkerEngine {
         try {
           final watcher = DirectoryWatcher(watchPath);
           final sub = watcher.events.listen(
-            (_) {
+            (event) {
+              if (event.path.isNotEmpty) {
+                (_pendingWatchFiles[collector.id] ??= <String>{})
+                    .add(event.path);
+              }
               _watchDebounce[collector.id]?.cancel();
               _watchDebounce[collector.id] = Timer(
                 const Duration(milliseconds: 500),
-                () => runScan(collector.id),
+                () {
+                  final changed = _pendingWatchFiles.remove(collector.id);
+                  runScan(collector.id, changedFiles: changed);
+                },
               );
             },
             onError: (_) {},
@@ -329,8 +347,17 @@ class _UsageWorkerEngine {
     String? rootOverride,
     List<PendingScanState>? extraStates,
     bool includeLiveDeltas = true,
+    Set<String>? changedFiles,
   }) {
-    if (_scanBusy) return;
+    if (_scanBusy) {
+      if (rootOverride == null && extraStates == null) {
+        if (changedFiles != null && changedFiles.isNotEmpty) {
+          (_pendingWatchFiles[sourceId] ??= <String>{}).addAll(changedFiles);
+        }
+        _pendingScanSources.add(sourceId);
+      }
+      return;
+    }
     final collector = collectorById(sourceId);
     if (collector == null) return;
     final settings = settingsStore.get();
@@ -339,12 +366,16 @@ class _UsageWorkerEngine {
     _scanBusy = true;
     try {
       const instance = kLocalInstance;
+      final effectiveChanged = changedFiles ?? _pendingWatchFiles.remove(sourceId);
+      final isPartialFileScan =
+          effectiveChanged != null && effectiveChanged.isNotEmpty;
       final ctx = ScanCtx(
         store: store,
         pricing: pricing,
         settings: settings,
         instance: instance,
         rootOverride: rootOverride,
+        changedFiles: effectiveChanged,
       );
       final report = collector.scan(ctx);
       _detectCache[sourceId] = (AppDatabase.nowMs(), report.detectedPaths);
@@ -367,6 +398,7 @@ class _UsageWorkerEngine {
         report.skipped,
         report.detectedPaths,
         null,
+        preserveHigherFileCount: isPartialFileScan,
       );
 
       if (outcome.changed > 0) {
@@ -386,6 +418,12 @@ class _UsageWorkerEngine {
       _emitSourceStatus(sourceId, kLocalInstance, HealthStatus.error, msg);
     } finally {
       _scanBusy = false;
+      if (_pendingScanSources.isNotEmpty) {
+        final nextSource = _pendingScanSources.first;
+        _pendingScanSources.remove(nextSource);
+        final nextChanged = _pendingWatchFiles.remove(nextSource);
+        runScan(nextSource, changedFiles: nextChanged);
+      }
     }
   }
 

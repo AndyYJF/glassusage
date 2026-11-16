@@ -232,6 +232,9 @@ class PricingService {
 
   Map<String, ModelPrice> get overrides => Map.unmodifiable(_overrides);
 
+  bool get hasFreshCache =>
+      _sourceLabel == 'cache' || _sourceLabel == 'litellm';
+
   PricingInfo get info => PricingInfo(
     modelCount: _prices.length,
     source: _sourceLabel,

@@ -538,54 +538,69 @@ class AppDatabase {
     return (start.millisecondsSinceEpoch, end.millisecondsSinceEpoch);
   }
 
-  static bool _sameCost(double? a, double? b) {
-    if (a == null && b == null) return true;
-    if (a == null || b == null) return false;
-    return (a - b).abs() <= 1e-11;
-  }
-
   int reprice(PricingService pricing) {
-    final rows = _db.select('''
-      SELECT id, model, model_norm, input_tokens, output_tokens,
-             cache_read_tokens, cache_write_tokens, cost_usd, cost_is_native
-      FROM usage_events
-    ''');
-
-    final toUpdate = <(String, double?, int)>[];
-    for (final r in rows) {
-      final id = (r['id'] as num).toInt();
-      final model = r['model'] as String;
-      final oldNorm = r['model_norm'] as String;
-      final oldCost = (r['cost_usd'] as num?)?.toDouble();
-      final nativeCost = (r['cost_is_native'] as num).toInt() != 0;
-      final input = (r['input_tokens'] as num?)?.toInt() ?? 0;
-      final output = (r['output_tokens'] as num?)?.toInt() ?? 0;
-      final cr = (r['cache_read_tokens'] as num?)?.toInt() ?? 0;
-      final cw = (r['cache_write_tokens'] as num?)?.toInt() ?? 0;
-
-      final norm = pricing.normalize(model);
-      final cost =
-          nativeCost ? oldCost : pricing.cost(norm, input, output, cr, cw);
-      if (norm != oldNorm || !_sameCost(cost, oldCost)) {
-        toUpdate.add((norm, cost, id));
-      }
-    }
-
-    if (toUpdate.isEmpty) {
+    final modelRows = _db.select('SELECT DISTINCT model FROM usage_events');
+    if (modelRows.isEmpty) {
       return 0;
     }
 
     _db.execute('BEGIN IMMEDIATE TRANSACTION');
-    final updateStmt = _db.prepare('''
+    final nativeStmt = _db.prepare('''
       UPDATE usage_events
-         SET model_norm = ?1, cost_usd = ?2
-       WHERE id = ?3
+         SET model_norm = ?1
+       WHERE model = ?2 AND cost_is_native != 0 AND model_norm != ?1
     ''');
+    final unpricedStmt = _db.prepare('''
+      UPDATE usage_events
+         SET model_norm = ?1, cost_usd = NULL
+       WHERE model = ?2 AND cost_is_native = 0
+         AND (model_norm != ?1 OR cost_usd IS NOT NULL)
+    ''');
+    final pricedStmt = _db.prepare('''
+      UPDATE usage_events
+         SET model_norm = ?1,
+             cost_usd = CASE
+               WHEN (cache_write_tokens > 0 AND ?6 <= 0.0) OR (cache_read_tokens > 0 AND ?5 <= 0.0)
+               THEN NULL
+               ELSE (input_tokens * ?3 + output_tokens * ?4 + cache_read_tokens * ?5 + cache_write_tokens * ?6)
+             END
+       WHERE model = ?2 AND cost_is_native = 0
+         AND (
+           model_norm != ?1
+           OR (
+             CASE
+               WHEN (cache_write_tokens > 0 AND ?6 <= 0.0) OR (cache_read_tokens > 0 AND ?5 <= 0.0)
+               THEN cost_usd IS NOT NULL
+               ELSE cost_usd IS NULL OR ABS(cost_usd - (input_tokens * ?3 + output_tokens * ?4 + cache_read_tokens * ?5 + cache_write_tokens * ?6)) > 1e-11
+             END
+           )
+         )
+    ''');
+
     var updated = 0;
     try {
-      for (final item in toUpdate) {
-        updateStmt.execute([item.$1, item.$2, item.$3]);
+      for (final r in modelRows) {
+        final model = r['model'] as String;
+        final norm = pricing.normalize(model);
+
+        nativeStmt.execute([norm, model]);
         updated += _db.updatedRows;
+
+        final price = pricing.priceFor(norm);
+        if (price == null) {
+          unpricedStmt.execute([norm, model]);
+          updated += _db.updatedRows;
+        } else {
+          pricedStmt.execute([
+            norm,
+            model,
+            price.inputCostPerToken,
+            price.outputCostPerToken,
+            price.cacheReadInputTokenCost,
+            price.cacheCreationInputTokenCost,
+          ]);
+          updated += _db.updatedRows;
+        }
       }
       if (updated > 0) {
         _rebuildAllRollup();
@@ -596,7 +611,9 @@ class AppDatabase {
       _db.execute('ROLLBACK');
       rethrow;
     } finally {
-      updateStmt.dispose();
+      nativeStmt.dispose();
+      unpricedStmt.dispose();
+      pricedStmt.dispose();
     }
   }
 
@@ -668,8 +685,12 @@ class AppDatabase {
     int fileCount,
     int skipped,
     List<String> paths,
-    String? error,
-  ) {
+    String? error, {
+    bool preserveHigherFileCount = false,
+  }) {
+    final fileCountUpdateExpr = preserveHigherFileCount
+        ? 'MAX(source_status.file_count, excluded.file_count)'
+        : 'excluded.file_count';
     _db.execute(
       '''
       INSERT INTO source_status
@@ -678,7 +699,7 @@ class AppDatabase {
       ON CONFLICT(source, instance) DO UPDATE SET
         last_scan_ms   = excluded.last_scan_ms,
         last_error     = excluded.last_error,
-        file_count     = excluded.file_count,
+        file_count     = $fileCountUpdateExpr,
         skipped_rows   = excluded.skipped_rows,
         detected_paths = excluded.detected_paths
       ''',
@@ -1215,17 +1236,33 @@ class AppDatabase {
     };
 
     final countRows = _db.select('''
-      SELECT source, instance, COUNT(*) AS cnt, MAX(ts_ms) AS max_ts
-      FROM usage_events
+      SELECT source, instance, COALESCE(SUM(events), 0) AS cnt
+      FROM daily_rollup
       GROUP BY source, instance
     ''');
-    final counts = <(String, String), (int, int?)>{
-      for (final r in countRows)
-        (r['source'] as String, r['instance'] as String): (
-          (r['cnt'] as num).toInt(),
-          (r['max_ts'] as num?)?.toInt(),
-        ),
-    };
+    final maxTsStmt = _db.prepare('''
+      SELECT MAX(ts_ms) AS max_ts
+      FROM usage_events
+      WHERE source = ?1 AND instance = ?2
+    ''');
+    final counts = <(String, String), (int, int?)>{};
+    try {
+      for (final r in countRows) {
+        final src = r['source'] as String;
+        final inst = r['instance'] as String;
+        final cnt = (r['cnt'] as num).toInt();
+        int? maxTs;
+        if (cnt > 0) {
+          final tsRows = maxTsStmt.select([src, inst]);
+          if (tsRows.isNotEmpty) {
+            maxTs = (tsRows.first['max_ts'] as num?)?.toInt();
+          }
+        }
+        counts[(src, inst)] = (cnt, maxTs);
+      }
+    } finally {
+      maxTsStmt.dispose();
+    }
 
     final remoteInstances = listRemote();
     final out = <SourceHealth>[];
@@ -1306,18 +1343,18 @@ class AppDatabase {
   }
 
   FilterOptions filterOptions() {
-    List<String> distinct(String col) {
+    List<String> distinctFrom(String table, String col) {
       final rows = _db.select(
-        'SELECT DISTINCT $col AS v FROM usage_events WHERE $col IS NOT NULL AND $col != \'\' ORDER BY v',
+        'SELECT DISTINCT $col AS v FROM $table WHERE $col IS NOT NULL AND $col != \'\' ORDER BY v',
       );
       return rows.map((r) => r['v'] as String).toList();
     }
 
     return FilterOptions(
-      source: distinct('source'),
-      provider: distinct('provider'),
-      modelNorm: distinct('model_norm'),
-      instance: distinct('instance'),
+      source: distinctFrom('daily_rollup', 'source'),
+      provider: distinctFrom('usage_events', 'provider'),
+      modelNorm: distinctFrom('daily_rollup', 'model_norm'),
+      instance: distinctFrom('daily_rollup', 'instance'),
     );
   }
 

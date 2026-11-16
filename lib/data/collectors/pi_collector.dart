@@ -111,12 +111,6 @@ class PiCollector extends Collector {
     ScanCtx ctx,
     String path,
   ) {
-    final stored = ctx.store.getScanState(SourceIds.pi, ctx.instance, path);
-    final size = fileSize(path);
-    final meta = (stored != null && size >= stored.offset && stored.extra != null)
-        ? fileMetaFromExtra(stored.extra!)
-        : PiFileMeta();
-
     JsonlChunk chunk;
     try {
       chunk = readNewLines(ctx.store, SourceIds.pi, ctx.instance, path);
@@ -124,6 +118,11 @@ class PiCollector extends Collector {
       return null;
     }
     if (chunk.lines.isEmpty) return null;
+
+    final stored = chunk.previousState;
+    final meta = (stored != null && !chunk.truncated && stored.extra != null)
+        ? fileMetaFromExtra(stored.extra!)
+        : PiFileMeta();
 
     if (meta.sessionId.isEmpty) {
       final header = _peekSessionHeader(path);

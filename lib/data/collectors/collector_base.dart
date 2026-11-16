@@ -18,6 +18,7 @@ class ScanCtx {
   final AppSettings settings;
   final String instance;
   final String? rootOverride;
+  final Set<String>? changedFiles;
 
   const ScanCtx({
     required this.store,
@@ -25,6 +26,7 @@ class ScanCtx {
     required this.settings,
     this.instance = kLocalInstance,
     this.rootOverride,
+    this.changedFiles,
   });
 
   factory ScanCtx.local({
@@ -247,12 +249,16 @@ class JsonlChunk {
   final int newOffset;
   final int newLineNo;
   final int mtimeMs;
+  final ScanState? previousState;
+  final bool truncated;
 
   const JsonlChunk({
     required this.lines,
     required this.newOffset,
     required this.newLineNo,
     required this.mtimeMs,
+    this.previousState,
+    this.truncated = false,
   });
 }
 
@@ -262,12 +268,14 @@ JsonlChunk readNewLines(
   String instance,
   String path,
 ) {
-  final state = store.getScanState(source, instance, path) ?? const ScanState();
-  final size = fileSize(path);
+  final stored = store.getScanState(source, instance, path);
+  final state = stored ?? const ScanState();
   final mtime = mtimeMs(path);
+  final size = fileSize(path);
 
-  var offset = size < state.offset ? 0 : state.offset;
-  var lineNo = size < state.offset ? 0 : lineNoFromExtra(state.extra);
+  final truncated = size < state.offset;
+  final offset = truncated ? 0 : state.offset;
+  final lineNo = truncated ? 0 : lineNoFromExtra(state.extra);
 
   if (offset >= size) {
     return JsonlChunk(
@@ -275,10 +283,20 @@ JsonlChunk readNewLines(
       newOffset: offset,
       newLineNo: lineNo,
       mtimeMs: mtime,
+      previousState: stored,
+      truncated: truncated,
     );
   }
 
-  return readLinesFromOffset(path, offset, lineNo, size: size, mtime: mtime);
+  return readLinesFromOffset(
+    path,
+    offset,
+    lineNo,
+    size: size,
+    mtime: mtime,
+    previousState: stored,
+    truncated: truncated,
+  );
 }
 
 JsonlChunk readLinesFromOffset(
@@ -287,6 +305,8 @@ JsonlChunk readLinesFromOffset(
   int lineNo, {
   int? size,
   int? mtime,
+  ScanState? previousState,
+  bool truncated = false,
 }) {
   final actualSize = size ?? fileSize(path);
   final actualMtime = mtime ?? mtimeMs(path);
@@ -296,6 +316,8 @@ JsonlChunk readLinesFromOffset(
       newOffset: offset,
       newLineNo: lineNo,
       mtimeMs: actualMtime,
+      previousState: previousState,
+      truncated: truncated,
     );
   }
 
@@ -322,6 +344,8 @@ JsonlChunk readLinesFromOffset(
       newOffset: offset,
       newLineNo: lineNo,
       mtimeMs: actualMtime,
+      previousState: previousState,
+      truncated: truncated,
     );
   }
 
@@ -344,6 +368,8 @@ JsonlChunk readLinesFromOffset(
     newOffset: newOffset,
     newLineNo: currentLineNo,
     mtimeMs: actualMtime,
+    previousState: previousState,
+    truncated: truncated,
   );
 }
 

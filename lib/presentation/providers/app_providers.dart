@@ -168,8 +168,8 @@ final showOnboardingProvider = StateProvider<bool>((ref) => false);
 
 /// Resolved I18n dictionary based on appSettingsProvider.locale.
 final i18nProvider = Provider<AppI18n>((ref) {
-  final settings = ref.watch(appSettingsProvider);
-  return AppI18n.fromSettings(settings);
+  final locale = ref.watch(appSettingsProvider.select((s) => s.locale));
+  return AppI18n.fromSettings(AppSettings(locale: locale));
 });
 
 /// AppController singleton provider.
@@ -190,6 +190,7 @@ class AppController {
   StreamSubscription<String>? _win32EventSub;
   bool _initialized = false;
   int _rangeRequest = 0;
+  bool _rangeDataDirty = false;
   bool _disposed = false;
   bool? _requestedWidgetMode;
   int _widgetModeRequest = 0;
@@ -248,6 +249,11 @@ class AppController {
     });
 
     _usageUpdatedSub = client.onUsageUpdated.listen((_) {
+      if (!ref.read(isWindowVisibleProvider) ||
+          ref.read(isMiniCardModeProvider)) {
+        _rangeDataDirty = true;
+        return;
+      }
       refreshRangeData();
     });
 
@@ -313,6 +319,7 @@ class AppController {
   Future<void> refreshRangeData() async {
     final client = _client;
     if (client == null) return;
+    _rangeDataDirty = false;
     final request = ++_rangeRequest;
     final preset = ref.read(selectedRangeProvider);
     final (from, to, bucket) = preset.resolveBounds();
@@ -423,6 +430,9 @@ class AppController {
       );
       if (!_disposed) {
         ref.read(isMiniCardModeProvider.notifier).state = enabled;
+        if (!enabled && _rangeDataDirty) {
+          unawaited(refreshRangeData());
+        }
       }
     } catch (error, stack) {
       FlutterError.reportError(FlutterErrorDetails(

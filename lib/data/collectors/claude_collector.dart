@@ -67,7 +67,16 @@ class ClaudeCollector extends Collector {
     return roots.where((dir) => Directory(dir).existsSync()).toList();
   }
 
+  static Set<String>? _cachedDesktopIds;
+  static int _cachedDesktopIdsAtMs = 0;
+  static const int _kDesktopIdsTtlMs = 60000;
+
   static Set<String> desktopSessionIds() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final cached = _cachedDesktopIds;
+    if (cached != null && (now - _cachedDesktopIdsAtMs) < _kDesktopIdsTtlMs) {
+      return cached;
+    }
     final ids = <String>{};
     for (final root in desktopMetaRoots()) {
       for (final file in findFiles(root, (f) => hasExt(f, 'json'))) {
@@ -77,6 +86,8 @@ class ClaudeCollector extends Collector {
         } catch (_) {}
       }
     }
+    _cachedDesktopIds = ids;
+    _cachedDesktopIdsAtMs = now;
     return ids;
   }
 
@@ -115,9 +126,16 @@ class ClaudeCollector extends Collector {
     if (roots.isEmpty) return ScanReport();
 
     final desktopIds = desktopSessionIds();
+    final changed = ctx.changedFiles
+        ?.where((f) => hasExt(f, 'jsonl') && File(f).existsSync())
+        .toList();
     final files = <String>[];
-    for (final r in roots) {
-      files.addAll(findFiles(r, (f) => hasExt(f, 'jsonl')));
+    if (changed != null && changed.isNotEmpty) {
+      files.addAll(changed);
+    } else {
+      for (final r in roots) {
+        files.addAll(findFiles(r, (f) => hasExt(f, 'jsonl')));
+      }
     }
 
     final report = ScanReport(
@@ -134,8 +152,8 @@ class ClaudeCollector extends Collector {
       }
       if (chunk.lines.isEmpty) continue;
       var timing = OutputTurnState();
-      final stored = ctx.store.getScanState(SourceIds.claude, ctx.instance, path);
-      if (stored != null && fileSize(path) >= stored.offset) {
+      final stored = chunk.previousState;
+      if (stored != null && !chunk.truncated) {
         try {
           final extra = jsonDecode(stored.extra ?? 'null');
           if (extra is Map) timing = OutputTurnState.fromJson(extra['outputTiming']);
