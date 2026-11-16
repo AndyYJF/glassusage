@@ -229,7 +229,11 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
     if (!mounted || _useScene || _readingStats) return;
     _readingStats = true;
     try {
-      final stats = await _glass.refreshStats();
+      final stats = await _glass.refreshStats(
+        region: defaultTargetPlatform == TargetPlatform.macOS
+            ? DesktopWindowManager.instance.miniCardBounds.value
+            : null,
+      );
       if (!mounted || stats == null) return;
       _setStatsPolling(
         stats.hasValidFrame || stats.paused || stats.captureState == 'failed'
@@ -305,6 +309,9 @@ class _MiniCardViewState extends ConsumerState<MiniCardView>
         _liveShader != null &&
         _glass.mode == DesktopGlassMode.realtime;
     final bounds = DesktopWindowManager.instance.miniCardBounds.value;
+    if (bounds != null) {
+      DesktopWindowManager.instance.revealMiniHostAfterLayout();
+    }
     final hostSize = MediaQuery.sizeOf(context);
     final card = ClipRRect(
       borderRadius: BorderRadius.circular(_miniCornerRadius),

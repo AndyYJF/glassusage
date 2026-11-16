@@ -1,3 +1,5 @@
+import 'dart:ui' show Rect;
+
 import 'package:desktop_glass/desktop_glass.dart';
 import 'package:flutter/foundation.dart';
 
@@ -53,11 +55,11 @@ class DesktopGlassController extends ChangeNotifier {
     }
   }
 
-  Future<GlassStats?> refreshStats() async {
+  Future<GlassStats?> refreshStats({Rect? region}) async {
     final owned = session;
     if (_disposed || owned == null) return null;
     try {
-      final stats = await backend.stats(owned.id);
+      final stats = await backend.stats(owned.id, region: region);
       if (_disposed || session?.id != owned.id) return null;
       currentStats = stats;
       if (stats == null) session = null;

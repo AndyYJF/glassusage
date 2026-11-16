@@ -23,7 +23,7 @@ class DesktopWindowManager extends WindowListener {
 
   static const MethodChannel _channel = MethodChannel('glassusage/win32');
   // 与 macos/Runner/MainFlutterWindow.swift 的处理器配套合并；
-  // 小窗拖动仅在手势开始时跨通道，后续鼠标移动由原生处理。
+  // 小窗固定宿主：仅在进入/退出、卡片落位时跨通道，拖动全程只改 Dart 场景。
   static const MethodChannel _macWindowChannel = MethodChannel(
     'glassusage/desktop_window',
   );
@@ -35,6 +35,7 @@ class DesktopWindowManager extends WindowListener {
   Offset _miniHostOrigin = Offset.zero;
   bool _sendingMiniBounds = false;
   bool _miniBoundsPending = false;
+  bool _miniHostRevealPending = false;
 
   Rect? _mainBounds;
   double _mainBoundsScale = 1;
@@ -45,6 +46,13 @@ class DesktopWindowManager extends WindowListener {
   bool _miniFrosted = false;
   WindowMaterial _material = WindowMaterial.acrylic;
   bool _isDark = false;
+
+  /// Platforms whose mini card moves inside a fixed transparent host window
+  /// (card placement and texture sampling are submitted in one Flutter scene).
+  static bool get _usesFixedHost => Platform.isWindows || Platform.isMacOS;
+  bool get _fixedHostMini => _usesFixedHost && _miniMode;
+  static MethodChannel get _hostChannel =>
+      Platform.isMacOS ? _macWindowChannel : _channel;
 
   Future<void> initialize() async {
     if (_initialized ||
@@ -60,16 +68,43 @@ class DesktopWindowManager extends WindowListener {
       const WindowOptions(
         size: Size(1220, 800),
         minimumSize: Size(900, 600),
+        center: true,
         backgroundColor: Colors.transparent,
         skipTaskbar: false,
         title: 'GlassUsage',
         titleBarStyle: TitleBarStyle.hidden,
       ),
-      () async {
-        await windowManager.show();
-      },
     );
+    await _fitInitialWindowToWorkArea();
+    await windowManager.show();
+    await windowManager.focus();
     _initialized = true;
+  }
+
+  Future<void> _fitInitialWindowToWorkArea() async {
+    try {
+      final displays = await screenRetriever.getAllDisplays();
+      if (displays.isEmpty) return;
+      final windowScale = _windowScale;
+      final currentBounds = await windowManager.getBounds();
+      final workArea = _workAreaFor(currentBounds, displays, windowScale);
+      final minimum = Size(
+        math.min(900, workArea.width),
+        math.min(600, workArea.height),
+      );
+      final size = _clampSize(const Size(1220, 800), workArea.size, minimum);
+      final centered = Rect.fromCenter(
+        center: workArea.center,
+        width: size.width,
+        height: size.height,
+      );
+      await windowManager.setMinimumSize(minimum);
+      await windowManager.setBounds(
+        _clampPosition(centered.topLeft, size, workArea) & size,
+      );
+    } catch (_) {
+      // Fall back to WindowOptions(center: true) if screen metrics fail.
+    }
   }
 
   Future<dynamic> _handleRunnerEvent(MethodCall call) async {
@@ -96,7 +131,7 @@ class DesktopWindowManager extends WindowListener {
 
   @override
   void onWindowMoved() {
-    if (Platform.isWindows && _miniMode) return;
+    if (_fixedHostMini) return;
     if (!_events.isClosed) _events.add('window:moved');
     _snapTimer?.cancel();
     if (_events.isClosed) return;
@@ -161,7 +196,7 @@ class DesktopWindowManager extends WindowListener {
 
   Future<void> setMiniFrosted(bool enabled) async {
     // A full-desktop host must remain transparent outside the card.
-    if (Platform.isWindows && _miniMode) enabled = false;
+    if (_fixedHostMini) enabled = false;
     if (_miniFrosted == enabled) return;
     _miniFrosted = enabled;
     if (!_initialized || !_miniMode) return;
@@ -173,15 +208,15 @@ class DesktopWindowManager extends WindowListener {
     }
   }
 
-  /// Applies native mini-window styling and macOS mouse routing.
+  /// Applies native mini-window styling and the fixed transparent host.
   ///
-  /// macOS disables system titlebar movement and forwards mini-window mouse
-  /// events to Flutter; leaving mini mode restores the original movable state.
+  /// Windows and macOS both return the card rectangle inside the host and the
+  /// host origin; leaving mini mode restores the main-window styling.
   /// Older runners without the handler are tolerated.
   Future<void> _setNativeMiniMode(bool enabled) async {
     try {
-      if (Platform.isWindows) {
-        final data = await _channel.invokeMapMethod<String, dynamic>(
+      if (_usesFixedHost) {
+        final data = await _hostChannel.invokeMapMethod<String, dynamic>(
           'setMiniMode',
           enabled,
         );
@@ -190,6 +225,7 @@ class DesktopWindowManager extends WindowListener {
             data['hostLeft'] as double,
             data['hostTop'] as double,
           );
+          if (Platform.isMacOS) _miniHostRevealPending = true;
           miniCardBounds.value = Rect.fromLTWH(
             data['left'] as double,
             data['top'] as double,
@@ -197,14 +233,31 @@ class DesktopWindowManager extends WindowListener {
             data['height'] as double,
           );
         } else if (!enabled) {
+          _miniHostRevealPending = false;
           miniCardBounds.value = null;
         }
-      } else if (Platform.isMacOS) {
-        await _macWindowChannel.invokeMethod<void>('setMiniMode', enabled);
       }
     } on MissingPluginException {
       // Older runner without the handler.
     }
+  }
+
+  /// macOS keeps the new host invisible until the card has been painted at
+  /// its host offset; called by MiniCardView once it builds with bounds.
+  void revealMiniHostAfterLayout() {
+    if (!_miniHostRevealPending) return;
+    _miniHostRevealPending = false;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // One more frame so the laid-out scene has reached the compositor.
+      WidgetsBinding.instance.scheduleFrame();
+      await WidgetsBinding.instance.endOfFrame;
+      if (!_miniMode) return;
+      try {
+        await _macWindowChannel.invokeMethod<void>('showMiniHost');
+      } on MissingPluginException {
+        // The native side also reveals itself after a timeout.
+      }
+    });
   }
 
   void moveMiniCard(Offset position, Size hostSize) {
@@ -235,7 +288,7 @@ class DesktopWindowManager extends WindowListener {
         final card = miniCardBounds.value;
         if (card == null) break;
         final scale = _windowScale;
-        await _channel.invokeMethod<void>(
+        await _hostChannel.invokeMethod<void>(
           'setMiniCardBounds',
           Float64List.fromList([
             card.left * scale,
@@ -254,13 +307,8 @@ class DesktopWindowManager extends WindowListener {
     // Cancel the pending snap before native mouse messages start moving it.
     _snapTimer?.cancel();
     _snapTimer = null;
-    if (Platform.isWindows && _miniMode) {
+    if (_fixedHostMini) {
       return; // The card moves within the fixed Flutter surface.
-    }
-    if (Platform.isMacOS && _miniMode) {
-      // 不走 window_manager 的 performDrag 嵌套循环，保证拖动中仍可提交纹理。
-      await _macWindowChannel.invokeMethod<void>('startMiniDragging');
-      return;
     }
     await windowManager.startDragging();
   }
@@ -325,7 +373,7 @@ class DesktopWindowManager extends WindowListener {
     if (!_initialized) return;
     final windowScale = _windowScale;
     final hostBounds = await windowManager.getBounds();
-    final currentBounds = Platform.isWindows && miniCardBounds.value != null
+    final currentBounds = _usesFixedHost && miniCardBounds.value != null
         ? miniCardBounds.value!.shift(_miniHostOrigin)
         : hostBounds;
     final displays = await screenRetriever.getAllDisplays();
@@ -342,7 +390,7 @@ class DesktopWindowManager extends WindowListener {
       final position = currentIsWidget
           ? currentBounds.topLeft
           : Offset(workArea.right - size.width - 16, workArea.top + 16);
-      if (Platform.isWindows && currentIsWidget) {
+      if (_usesFixedHost && currentIsWidget) {
         miniCardBounds.value =
             _clampPosition(position, size, workArea) - _miniHostOrigin & size;
         await _sendMiniBounds();
@@ -400,7 +448,7 @@ class DesktopWindowManager extends WindowListener {
   Future<void> _snapWidgetToEdge() async {
     if (!_initialized || !_miniMode) return;
     final windowScale = _windowScale;
-    final bounds = Platform.isWindows && miniCardBounds.value != null
+    final bounds = _usesFixedHost && miniCardBounds.value != null
         ? miniCardBounds.value!.shift(_miniHostOrigin)
         : await windowManager.getBounds();
     final displays = await screenRetriever.getAllDisplays();
@@ -421,7 +469,7 @@ class DesktopWindowManager extends WindowListener {
       y = area.bottom - bounds.height - margin;
     }
     if (x != bounds.left || y != bounds.top) {
-      if (Platform.isWindows && miniCardBounds.value != null) {
+      if (_usesFixedHost && miniCardBounds.value != null) {
         miniCardBounds.value = (Offset(x, y) - _miniHostOrigin) & bounds.size;
         await _sendMiniBounds();
       } else {

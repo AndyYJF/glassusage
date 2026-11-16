@@ -167,9 +167,13 @@ class DesktopGlass {
   Future<void> _control(String method, int sessionId) =>
       _channel.invokeMethod<void>(method, {'sessionId': sessionId});
 
-  Future<GlassStats?> stats(int sessionId) async {
+  /// [region] is the card rectangle in texture pixels; macOS uses it for
+  /// luminance sampling because its texture covers the whole display.
+  Future<GlassStats?> stats(int sessionId, {Rect? region}) async {
     final data = await _channel.invokeMapMethod<String, dynamic>('stats', {
       'sessionId': sessionId,
+      if (region != null)
+        'region': [region.left, region.top, region.width, region.height],
     });
     return data == null || data['active'] != true ? null : GlassStats(data);
   }
